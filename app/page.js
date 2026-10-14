@@ -38,13 +38,13 @@ function quoteForDay(dayKey) {
     'Hard days build strong habits.',
     'The goal is not to feel good first — act first.',
   ];
-  const seed = dayKey.split('').reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
+  const seed = (dayKey || '').split('').reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
   return quotes[seed % quotes.length];
 }
 
 export default function Page() {
-  const [tab, setTab] = useState('today'); // today | archive
-  const [dueTab, setDueTab] = useState('today'); // today | tomorrow | later
+  const [tab, setTab] = useState('today');
+  const [dueTab, setDueTab] = useState('today');
   const [categoryFilter, setCategoryFilter] = useState('all');
 
   const [currentDay, setCurrentDay] = useState('');
@@ -66,8 +66,9 @@ export default function Page() {
   const [editPriority, setEditPriority] = useState('Medium');
   const [editDueDate, setEditDueDate] = useState('');
 
-  const todayKey = currentDay || localDateKey(new Date());
-  const tomorrowKey = addDaysToKey(todayKey, 1);
+  // IMPORTANT: no new Date() in render path
+  const todayKey = currentDay;
+  const tomorrowKey = currentDay ? addDaysToKey(currentDay, 1) : '';
 
   async function runRollover() {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
@@ -120,6 +121,8 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
+    if (!currentDay) return;
+
     const timer = setInterval(() => {
       const nowDay = localDateKey(new Date());
       if (nowDay !== currentDay) {
@@ -133,10 +136,11 @@ export default function Page() {
   }, [currentDay]);
 
   function bucketForDueDate(dueDate) {
+    if (!todayKey || !tomorrowKey) return 'today';
     if (dueDate === todayKey) return 'today';
     if (dueDate === tomorrowKey) return 'tomorrow';
     if (dueDate > tomorrowKey) return 'later';
-    return 'today'; // overdue included with today
+    return 'today';
   }
 
   const openTasks = useMemo(() => tasks.filter((t) => t.status === 'open'), [tasks]);
@@ -151,6 +155,7 @@ export default function Page() {
   }, [openTasks, dueTab, categoryFilter, todayKey, tomorrowKey]);
 
   const completedTodayTasks = useMemo(() => {
+    if (!todayKey) return [];
     return tasks.filter((t) => {
       if (t.status !== 'done' || !t.completed_at) return false;
       const completedDay = localDateKey(new Date(t.completed_at));
@@ -160,23 +165,25 @@ export default function Page() {
     });
   }, [tasks, todayKey, categoryFilter]);
 
-  const todayDueAll = useMemo(() => tasks.filter((t) => t.due_date === todayKey), [tasks, todayKey]);
+  const todayDueAll = useMemo(() => {
+    if (!todayKey) return [];
+    return tasks.filter((t) => t.due_date === todayKey);
+  }, [tasks, todayKey]);
+
   const todayDueDone = todayDueAll.filter((t) => t.status === 'done').length;
   const todayDueTotal = todayDueAll.length;
   const progressPct = todayDueTotal === 0 ? 0 : Math.round((todayDueDone / todayDueTotal) * 100);
 
   const allCategories = useMemo(() => {
     const base = ['Personal', 'Work', 'Health', 'Family', 'Finance'];
-    const fromTasks = tasks
-      .map((t) => t.category || 'Uncategorized')
-      .filter(Boolean);
+    const fromTasks = tasks.map((t) => t.category || 'Uncategorized').filter(Boolean);
     return Array.from(new Set([...base, ...fromTasks]));
   }, [tasks]);
 
   async function addTask(e) {
     e.preventDefault();
     const title = newTask.trim();
-    if (!title) return;
+    if (!title || !todayKey) return;
 
     setSaving(true);
     setError(null);
@@ -252,7 +259,7 @@ export default function Page() {
 
   async function saveEdit(taskId) {
     const title = editTaskTitle.trim();
-    if (!title) return;
+    if (!title || !todayKey) return;
 
     setError(null);
     try {
@@ -294,9 +301,7 @@ export default function Page() {
             <h1 className="text-3xl font-bold tracking-wide text-emerald-300 drop-shadow-sm">
               Rich&apos;s Life HQ
             </h1>
-            <p className="mt-2 text-sm text-emerald-400/90 italic">
-              “{dailyQuote}”
-            </p>
+            <p className="mt-2 text-sm text-emerald-400/90 italic">“{dailyQuote}”</p>
           </div>
 
           <div className="flex gap-2">
@@ -415,7 +420,7 @@ export default function Page() {
 
                 <button
                   type="submit"
-                  disabled={saving}
+                  disabled={saving || !todayKey}
                   className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-black hover:bg-emerald-400 disabled:opacity-50"
                 >
                   Add
@@ -647,8 +652,7 @@ export default function Page() {
                         Due: {task.due_date}
                       </span>
                       <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
-                        Archived:{' '}
-                        {task.archived_at ? new Date(task.archived_at).toLocaleString() : '—'}
+                        Archived: {task.archived_at ? new Date(task.archived_at).toLocaleString() : '—'}
                       </span>
                     </div>
                   </li>
