@@ -21,10 +21,6 @@ function addDaysToKey(key, days) {
   return localDateKey(base);
 }
 
-function fourteenDaysAgoISO() {
-  return new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-}
-
 function quoteForDay(dayKey) {
   const quotes = [
     'Small wins stack into big victories.',
@@ -42,6 +38,14 @@ function quoteForDay(dayKey) {
   return quotes[seed % quotes.length];
 }
 
+function titleCaseEntryType(type) {
+  const t = String(type || 'task').toLowerCase();
+  if (t === 'event') return 'Event';
+  if (t === 'reminder') return 'Reminder';
+  if (t === 'appointment') return 'Appointment';
+  return 'Task';
+}
+
 export default function Page() {
   const [tab, setTab] = useState('today');
   const [dueTab, setDueTab] = useState('today');
@@ -52,9 +56,9 @@ export default function Page() {
   const [newCategory, setNewCategory] = useState('Personal');
   const [newPriority, setNewPriority] = useState('Medium');
   const [newDueDate, setNewDueDate] = useState('');
+  const [newEntryType, setNewEntryType] = useState('task');
 
   const [tasks, setTasks] = useState([]);
-  const [archiveTasks, setArchiveTasks] = useState([]);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -65,22 +69,15 @@ export default function Page() {
   const [editCategory, setEditCategory] = useState('Personal');
   const [editPriority, setEditPriority] = useState('Medium');
   const [editDueDate, setEditDueDate] = useState('');
+  const [editEntryType, setEditEntryType] = useState('task');
 
-  // IMPORTANT: no new Date() in render path
   const todayKey = currentDay;
   const tomorrowKey = currentDay ? addDaysToKey(currentDay, 1) : '';
-
-  async function runRollover() {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-    const { error } = await supabase.rpc('archive_rollover', { p_tz: tz });
-    if (error) throw error;
-  }
 
   async function loadTasks() {
     const { data, error } = await supabase
       .from('tasks')
       .select('*')
-      .in('status', ['open', 'done'])
       .order('due_date', { ascending: true })
       .order('created_at', { ascending: true });
 
@@ -88,23 +85,10 @@ export default function Page() {
     setTasks(data || []);
   }
 
-  async function loadArchive() {
-    const { data, error } = await supabase
-      .from('tasks')
-      .select('*')
-      .eq('status', 'archived')
-      .gte('archived_at', fourteenDaysAgoISO())
-      .order('archived_at', { ascending: false });
-
-    if (error) throw error;
-    setArchiveTasks(data || []);
-  }
-
   async function refreshAll() {
     setError(null);
     try {
-      await runRollover();
-      await Promise.all([loadTasks(), loadArchive()]);
+      await loadTasks();
     } catch (e) {
       setError(e?.message || 'Failed to load data.');
     } finally {
@@ -133,17 +117,20 @@ export default function Page() {
     }, 60_000);
 
     return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentDay]);
 
   function bucketForDueDate(dueDate) {
     if (!todayKey || !tomorrowKey) return 'today';
+    if (!dueDate) return 'later';
     if (dueDate === todayKey) return 'today';
     if (dueDate === tomorrowKey) return 'tomorrow';
     if (dueDate > tomorrowKey) return 'later';
     return 'today';
   }
 
-  const openTasks = useMemo(() => tasks.filter((t) => t.status === 'open'), [tasks]);
+  // Source of truth for completion = completed_at
+  const openTasks = useMemo(() => tasks.filter((t) => !t.completed_at), [tasks]);
 
   const filteredOpenTasks = useMemo(() => {
     return openTasks.filter((t) => {
@@ -157,7 +144,7 @@ export default function Page() {
   const completedTodayTasks = useMemo(() => {
     if (!todayKey) return [];
     return tasks.filter((t) => {
-      if (t.status !== 'done' || !t.completed_at) return false;
+      if (!t.completed_at) return false;
       const completedDay = localDateKey(new Date(t.completed_at));
       const inCategory =
         categoryFilter === 'all' ? true : (t.category || 'Uncategorized') === categoryFilter;
@@ -165,17 +152,32 @@ export default function Page() {
     });
   }, [tasks, todayKey, categoryFilter]);
 
+  const archiveTasks = useMemo(() => {
+    if (!todayKey) return [];
+    const startToday = parseDateKey(todayKey);
+    const start14DaysAgo = new Date(startToday);
+    start14DaysAgo.setDate(start14DaysAgo.getDate() - 14);
+
+    return tasks
+      .filter((t) => {
+        if (!t.completed_at) return false;
+        const completed = new Date(t.completed_at);
+        return completed < startToday && completed >= start14DaysAgo;
+      })
+      .sort((a, b) => new Date(b.completed_at).getTime() - new Date(a.completed_at).getTime());
+  }, [tasks, todayKey]);
+
   const todayDueAll = useMemo(() => {
     if (!todayKey) return [];
     return tasks.filter((t) => t.due_date === todayKey);
   }, [tasks, todayKey]);
 
-  const todayDueDone = todayDueAll.filter((t) => t.status === 'done').length;
+  const todayDueDone = todayDueAll.filter((t) => !!t.completed_at).length;
   const todayDueTotal = todayDueAll.length;
   const progressPct = todayDueTotal === 0 ? 0 : Math.round((todayDueDone / todayDueTotal) * 100);
 
   const allCategories = useMemo(() => {
-    const base = ['Personal', 'Work', 'Health', 'Family', 'Finance'];
+    const base = ['Personal', 'Work', 'Health', 'Family', 'Finance', 'Personal Growth', 'Other'];
     const fromTasks = tasks.map((t) => t.category || 'Uncategorized').filter(Boolean);
     return Array.from(new Set([...base, ...fromTasks]));
   }, [tasks]);
@@ -193,7 +195,7 @@ export default function Page() {
         category: newCategory || 'Personal',
         priority: newPriority || 'Medium',
         due_date: newDueDate || todayKey,
-        status: 'open',
+        entry_type: (newEntryType || 'task').toLowerCase(),
       };
 
       const { error } = await supabase.from('tasks').insert(payload);
@@ -203,6 +205,7 @@ export default function Page() {
       setNewCategory('Personal');
       setNewPriority('Medium');
       setNewDueDate(todayKey);
+      setNewEntryType('task');
       await loadTasks();
     } catch (e) {
       setError(e?.message || 'Failed to add task.');
@@ -214,12 +217,13 @@ export default function Page() {
   async function toggleDone(task) {
     setError(null);
     try {
-      const nextDone = task.status !== 'done';
+      const nextCompletedAt = task.completed_at ? null : new Date().toISOString();
+
+      // Intentionally update only completed_at (avoids status constraint issues)
       const { error } = await supabase
         .from('tasks')
         .update({
-          status: nextDone ? 'done' : 'open',
-          completed_at: nextDone ? new Date().toISOString() : null,
+          completed_at: nextCompletedAt,
         })
         .eq('id', task.id);
 
@@ -235,7 +239,7 @@ export default function Page() {
     try {
       const { error } = await supabase.from('tasks').delete().eq('id', taskId);
       if (error) throw error;
-      await Promise.all([loadTasks(), loadArchive()]);
+      await loadTasks();
     } catch (e) {
       setError(e?.message || 'Failed to delete task.');
     }
@@ -247,6 +251,7 @@ export default function Page() {
     setEditCategory(task.category || 'Personal');
     setEditPriority(task.priority || 'Medium');
     setEditDueDate(task.due_date || todayKey);
+    setEditEntryType((task.entry_type || 'task').toLowerCase());
   }
 
   function cancelEdit() {
@@ -255,6 +260,7 @@ export default function Page() {
     setEditCategory('Personal');
     setEditPriority('Medium');
     setEditDueDate('');
+    setEditEntryType('task');
   }
 
   async function saveEdit(taskId) {
@@ -270,6 +276,7 @@ export default function Page() {
           category: editCategory || 'Personal',
           priority: editPriority || 'Medium',
           due_date: editDueDate || todayKey,
+          entry_type: (editEntryType || 'task').toLowerCase(),
         })
         .eq('id', taskId);
 
@@ -381,13 +388,24 @@ export default function Page() {
             </div>
 
             <form onSubmit={addTask} className="rounded-xl border border-emerald-500/20 bg-zinc-950 p-4">
-              <div className="grid grid-cols-1 gap-2 md:grid-cols-6">
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-7">
                 <input
                   value={newTask}
                   onChange={(e) => setNewTask(e.target.value)}
                   placeholder="Add a task..."
                   className="md:col-span-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
                 />
+
+                <select
+                  value={newEntryType}
+                  onChange={(e) => setNewEntryType(e.target.value)}
+                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                >
+                  <option value="task">Task</option>
+                  <option value="event">Event</option>
+                  <option value="reminder">Reminder</option>
+                  <option value="appointment">Appointment</option>
+                </select>
 
                 <select
                   value={newCategory}
@@ -479,12 +497,22 @@ export default function Page() {
                   filteredOpenTasks.map((task) => (
                     <li key={task.id} className="border-t border-zinc-800 px-4 py-3">
                       {editingId === task.id ? (
-                        <div className="grid grid-cols-1 gap-2 md:grid-cols-6">
+                        <div className="grid grid-cols-1 gap-2 md:grid-cols-7">
                           <input
                             value={editTaskTitle}
                             onChange={(e) => setEditTaskTitle(e.target.value)}
                             className="md:col-span-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
                           />
+                          <select
+                            value={editEntryType}
+                            onChange={(e) => setEditEntryType(e.target.value)}
+                            className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                          >
+                            <option value="task">Task</option>
+                            <option value="event">Event</option>
+                            <option value="reminder">Reminder</option>
+                            <option value="appointment">Appointment</option>
+                          </select>
                           <select
                             value={editCategory}
                             onChange={(e) => setEditCategory(e.target.value)}
@@ -538,6 +566,9 @@ export default function Page() {
                             <div>
                               <div className="text-base text-emerald-100">{task.title}</div>
                               <div className="mt-1 flex flex-wrap gap-2 text-xs">
+                                <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 text-cyan-300">
+                                  {titleCaseEntryType(task.entry_type)}
+                                </span>
                                 <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-emerald-300">
                                   {task.category || 'Uncategorized'}
                                 </span>
@@ -549,7 +580,7 @@ export default function Page() {
                                   {task.priority || 'Medium'}
                                 </span>
                                 <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
-                                  Due: {task.due_date}
+                                  Due: {task.due_date || '—'}
                                 </span>
                               </div>
                             </div>
@@ -601,6 +632,9 @@ export default function Page() {
                         <div>
                           <div className="text-purple-200 line-through">{task.title}</div>
                           <div className="mt-1 flex flex-wrap gap-2 text-xs">
+                            <span className="rounded border border-cyan-400/30 bg-cyan-500/10 px-2 py-0.5 text-cyan-300">
+                              {titleCaseEntryType(task.entry_type)}
+                            </span>
                             <span className="rounded border border-purple-400/40 bg-purple-500/10 px-2 py-0.5 text-purple-300">
                               {task.category || 'Uncategorized'}
                             </span>
@@ -608,7 +642,10 @@ export default function Page() {
                               Priority: {task.priority || 'Medium'}
                             </span>
                             <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
-                              Due: {task.due_date}
+                              Due: {task.due_date || '—'}
+                            </span>
+                            <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
+                              Completed: {task.completed_at ? new Date(task.completed_at).toLocaleString() : '—'}
                             </span>
                           </div>
                         </div>
@@ -640,8 +677,11 @@ export default function Page() {
               ) : (
                 archiveTasks.map((task) => (
                   <li key={task.id} className="border-t border-zinc-800 px-4 py-3 text-sm">
-                    <div className="font-medium text-emerald-200">{task.title}</div>
+                    <div className="font-medium text-emerald-200 line-through">{task.title}</div>
                     <div className="mt-1 flex flex-wrap gap-2 text-xs">
+                      <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 text-cyan-300">
+                        {titleCaseEntryType(task.entry_type)}
+                      </span>
                       <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-emerald-300">
                         {task.category || 'Uncategorized'}
                       </span>
@@ -649,10 +689,10 @@ export default function Page() {
                         Priority: {task.priority || 'Medium'}
                       </span>
                       <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
-                        Due: {task.due_date}
+                        Due: {task.due_date || '—'}
                       </span>
                       <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
-                        Archived: {task.archived_at ? new Date(task.archived_at).toLocaleString() : '—'}
+                        Completed: {task.completed_at ? new Date(task.completed_at).toLocaleString() : '—'}
                       </span>
                     </div>
                   </li>
