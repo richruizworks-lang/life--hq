@@ -520,10 +520,19 @@ export default function LifeHQPage() {
                       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                         <div>
                           <p className="font-semibold">{item.title}</p>
-                          <p className="text-sm text-slate-300">
-                            {capitalize(item.entry_type)} • {item.category || 'No category'} •{' '}
-                            {capitalize(item.priority)} priority • Due: {item.due_date || 'No date'}
-                          </p>
+                          <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-slate-300">
+                            <span>{capitalize(item.entry_type)}</span>
+                            <span>•</span>
+                            <span>{item.category || 'No category'}</span>
+                            <span>•</span>
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-xs font-semibold ${priorityBadgeClasses(item.priority)}`}
+                            >
+                              {capitalize(item.priority)}
+                            </span>
+                            <span>•</span>
+                            <span>Due: {item.due_date || 'No date'}</span>
+                          </div>
                           <StatusBadge status={item.status} />
                         </div>
                         <div className="flex flex-wrap gap-2">
@@ -579,10 +588,19 @@ export default function LifeHQPage() {
                     className="rounded-lg border border-purple-800 bg-purple-900/30 p-3"
                   >
                     <p className="font-medium">{item.title}</p>
-                    <p className="text-sm text-purple-200/90">
-                      {capitalize(item.entry_type)} • {item.category || 'No category'} • Completed:{' '}
-                      {formatDateTime(item.completed_at)}
-                    </p>
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-purple-200/90">
+                      <span>{capitalize(item.entry_type)}</span>
+                      <span>•</span>
+                      <span>{item.category || 'No category'}</span>
+                      <span>•</span>
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-xs font-semibold ${priorityBadgeClasses(item.priority)}`}
+                      >
+                        {capitalize(item.priority)}
+                      </span>
+                      <span>•</span>
+                      <span>Completed: {formatDateTime(item.completed_at)}</span>
+                    </div>
                   </div>
                 ))}
             </div>
@@ -618,4 +636,10 @@ function formatDateTime(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
   return d.toLocaleString();
+}
+
+function priorityBadgeClasses(priority) {
+  if (priority === 'high') return 'bg-red-900 text-red-200 border border-red-700';
+  if (priority === 'medium') return 'bg-yellow-900 text-yellow-200 border border-yellow-700';
+  return 'bg-sky-900 text-sky-200 border border-sky-700';
 }
