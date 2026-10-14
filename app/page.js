@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { supabase } from '../lib/supabase';
+import { supabase } from '../lib/supabase'; 
 // If this import fails in your project, use:
 // import { supabase } from '@/lib/supabase-browser';
 
@@ -10,10 +10,6 @@ function localDateKey(d) {
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
-}
-
-function todayKey() {
-  return localDateKey(new Date());
 }
 
 function fourteenDaysAgoISO() {
@@ -50,7 +46,7 @@ export default function Page() {
   }
 
   async function loadToday() {
-    const today = todayKey();
+    const today = localDateKey(new Date());
     const { data, error } = await supabase
       .from('tasks')
       .select('*')
@@ -87,7 +83,7 @@ export default function Page() {
   }
 
   useEffect(() => {
-    setCurrentDay(todayKey());
+    setCurrentDay(localDateKey(new Date()));
     refreshAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -95,7 +91,7 @@ export default function Page() {
   // Check every minute for day change
   useEffect(() => {
     const timer = setInterval(() => {
-      const nowDay = todayKey();
+      const nowDay = localDateKey(new Date());
       if (nowDay !== currentDay) {
         setCurrentDay(nowDay);
         refreshAll();
@@ -115,7 +111,7 @@ export default function Page() {
     try {
       const { error } = await supabase.from('tasks').insert({
         title,
-        due_date: todayKey(),
+        due_date: localDateKey(new Date()),
         status: 'open',
       });
       if (error) throw error;
