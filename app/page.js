@@ -2,15 +2,18 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 
-function LifeHQPage() {
+export default function LifeHQPage() {
   const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
   const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('today'); // today | tomorrow | beyond
+  const [activeTab, setActiveTab] = useState('today');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+
+  const [todayStr, setTodayStr] = useState('');
+  const [tomorrowStr, setTomorrowStr] = useState('');
 
   const [form, setForm] = useState({
     title: '',
@@ -31,8 +34,13 @@ function LifeHQPage() {
 
   const hasSupabaseConfig = SUPABASE_URL && SUPABASE_ANON_KEY;
 
-  const todayStr = toDateInputValue(new Date());
-  const tomorrowStr = toDateInputValue(addDays(new Date(), 1));
+  useEffect(() => {
+    const now = new Date();
+    setTodayStr(toDateInputValue(now));
+    const tm = new Date(now);
+    tm.setDate(tm.getDate() + 1);
+    setTomorrowStr(toDateInputValue(tm));
+  }, []);
 
   useEffect(() => {
     loadItems();
@@ -73,7 +81,6 @@ function LifeHQPage() {
       setLoading(true);
       setError('');
 
-      // Keep overdue status in sync each day
       await supabaseRequest('/rest/v1/rpc/normalize_overdue', {
         method: 'POST',
         body: JSON.stringify({}),
@@ -93,8 +100,8 @@ function LifeHQPage() {
 
   function deriveStatus(item) {
     if (item.completed_at) return 'completed';
-    if (item.due_date && item.due_date < todayStr) return 'overdue';
-    return 'open';
+    if (todayStr && item.due_date && item.due_date < todayStr) return 'overdue';
+    return item.status || 'open';
   }
 
   const normalizedItems = useMemo(
@@ -106,20 +113,29 @@ function LifeHQPage() {
     [items, todayStr]
   );
 
-  const dueTodayItems = normalizedItems.filter((i) => {
-    if (i.status === 'completed') return false;
-    return i.due_date === todayStr || i.status === 'overdue';
-  });
+  const dueTodayItems = useMemo(() => {
+    if (!todayStr) return [];
+    return normalizedItems.filter((i) => {
+      if (i.status === 'completed') return false;
+      return i.due_date === todayStr || i.status === 'overdue';
+    });
+  }, [normalizedItems, todayStr]);
 
-  const dueTomorrowItems = normalizedItems.filter(
-    (i) => i.status !== 'completed' && i.due_date === tomorrowStr
-  );
+  const dueTomorrowItems = useMemo(() => {
+    if (!tomorrowStr) return [];
+    return normalizedItems.filter(
+      (i) => i.status !== 'completed' && i.due_date === tomorrowStr
+    );
+  }, [normalizedItems, tomorrowStr]);
 
-  const beyondTomorrowItems = normalizedItems.filter((i) => {
-    if (i.status === 'completed') return false;
-    if (!i.due_date) return false;
-    return i.due_date > tomorrowStr;
-  });
+  const beyondTomorrowItems = useMemo(() => {
+    if (!tomorrowStr) return [];
+    return normalizedItems.filter((i) => {
+      if (i.status === 'completed') return false;
+      if (!i.due_date) return false;
+      return i.due_date > tomorrowStr;
+    });
+  }, [normalizedItems, tomorrowStr]);
 
   const completedItems = normalizedItems.filter((i) => i.status === 'completed');
 
@@ -130,9 +146,13 @@ function LifeHQPage() {
       ? dueTomorrowItems
       : beyondTomorrowItems;
 
-  const todayAll = normalizedItems.filter(
-    (i) => i.due_date === todayStr || (i.status === 'overdue' && !i.completed_at)
-  );
+  const todayAll = useMemo(() => {
+    if (!todayStr) return [];
+    return normalizedItems.filter(
+      (i) => i.due_date === todayStr || (i.status === 'overdue' && !i.completed_at)
+    );
+  }, [normalizedItems, todayStr]);
+
   const todayCompleted = todayAll.filter((i) => i.status === 'completed').length;
   const progress = todayAll.length ? Math.round((todayCompleted / todayAll.length) * 100) : 0;
 
@@ -271,6 +291,64 @@ function LifeHQPage() {
     }
   }
 
+  function TabButton({ active = false, onClick = () => {}, label = '', count = 0 }) {
+    return (
+      <button
+        onClick={onClick}
+        className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
+          active ? 'bg-purple-600 text-white' : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
+        }`}
+        type="button"
+      >
+        {label} ({count})
+      </button>
+    );
+  }
+
+  function StatusBadge({ status = 'open' }) {
+    const base = 'inline-block rounded-full px-2 py-1 text-xs font-semibold mt-2';
+    if (status === 'completed') {
+      return <span className={`${base} bg-emerald-900 text-emerald-200`}>Completed</span>;
+    }
+    if (status === 'overdue') {
+      return <span className={`${base} bg-red-900 text-red-200`}>Overdue</span>;
+    }
+    return <span className={`${base} bg-slate-700 text-slate-200`}>Open</span>;
+  }
+
+  function ProgressRing({ percent = 0 }) {
+    const radius = 30;
+    const stroke = 8;
+    const normalizedRadius = radius - stroke / 2;
+    const circumference = normalizedRadius * 2 * Math.PI;
+    const strokeDashoffset = circumference - (percent / 100) * circumference;
+
+    return (
+      <svg height={radius * 2} width={radius * 2} className="shrink-0">
+        <circle
+          stroke="#334155"
+          fill="transparent"
+          strokeWidth={stroke}
+          r={normalizedRadius}
+          cx={radius}
+          cy={radius}
+        />
+        <circle
+          stroke="#a855f7"
+          fill="transparent"
+          strokeWidth={stroke}
+          strokeLinecap="round"
+          strokeDasharray={`${circumference} ${circumference}`}
+          style={{ strokeDashoffset }}
+          r={normalizedRadius}
+          cx={radius}
+          cy={radius}
+          transform={`rotate(-90 ${radius} ${radius})`}
+        />
+      </svg>
+    );
+  }
+
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
       <div className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6 lg:px-8">
@@ -399,7 +477,9 @@ function LifeHQPage() {
                         <select
                           className="rounded border border-slate-700 bg-slate-900 px-3 py-2"
                           value={editForm.entry_type}
-                          onChange={(e) => setEditForm((f) => ({ ...f, entry_type: e.target.value }))}
+                          onChange={(e) =>
+                            setEditForm((f) => ({ ...f, entry_type: e.target.value }))
+                          }
                         >
                           <option value="task">Task</option>
                           <option value="event">Event</option>
@@ -521,76 +601,12 @@ function LifeHQPage() {
   );
 }
 
-function TabButton({ active = false, onClick = () => {}, label = '', count = 0 }) {
-  return (
-    <button
-      onClick={onClick}
-      className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
-        active ? 'bg-purple-600 text-white' : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
-      }`}
-      type="button"
-    >
-      {label} ({count})
-    </button>
-  );
-}
-
-function StatusBadge({ status = 'open' }) {
-  const base = 'inline-block rounded-full px-2 py-1 text-xs font-semibold mt-2';
-  if (status === 'completed') {
-    return <span className={`${base} bg-emerald-900 text-emerald-200`}>Completed</span>;
-  }
-  if (status === 'overdue') {
-    return <span className={`${base} bg-red-900 text-red-200`}>Overdue</span>;
-  }
-  return <span className={`${base} bg-slate-700 text-slate-200`}>Open</span>;
-}
-
-function ProgressRing({ percent = 0 }) {
-  const radius = 30;
-  const stroke = 8;
-  const normalizedRadius = radius - stroke / 2;
-  const circumference = normalizedRadius * 2 * Math.PI;
-  const strokeDashoffset = circumference - (percent / 100) * circumference;
-
-  return (
-    <svg height={radius * 2} width={radius * 2} className="shrink-0">
-      <circle
-        stroke="#334155"
-        fill="transparent"
-        strokeWidth={stroke}
-        r={normalizedRadius}
-        cx={radius}
-        cy={radius}
-      />
-      <circle
-        stroke="#a855f7"
-        fill="transparent"
-        strokeWidth={stroke}
-        strokeLinecap="round"
-        strokeDasharray={`${circumference} ${circumference}`}
-        style={{ strokeDashoffset }}
-        r={normalizedRadius}
-        cx={radius}
-        cy={radius}
-        transform={`rotate(-90 ${radius} ${radius})`}
-      />
-    </svg>
-  );
-}
-
 function toDateInputValue(d) {
   const dt = new Date(d);
   const yyyy = dt.getFullYear();
   const mm = String(dt.getMonth() + 1).padStart(2, '0');
   const dd = String(dt.getDate()).padStart(2, '0');
   return `${yyyy}-${mm}-${dd}`;
-}
-
-function addDays(date, days) {
-  const d = new Date(date);
-  d.setDate(d.getDate() + days);
-  return d;
 }
 
 function capitalize(s) {
@@ -603,5 +619,3 @@ function formatDateTime(iso) {
   const d = new Date(iso);
   return d.toLocaleString();
 }
-
-export default LifeHQPage;
