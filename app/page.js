@@ -1,15 +1,19 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { supabase } from '../lib/supabase'; 
+import { supabase } from '../lib/supabase';
 // If this import fails in your project, use:
 // import { supabase } from '@/lib/supabase-browser';
 
-function localDateKey(d = new Date()) {
+function localDateKey(d) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+}
+
+function todayKey() {
+  return localDateKey(new Date());
 }
 
 function fourteenDaysAgoISO() {
@@ -24,7 +28,7 @@ export default function Page() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
-  const [currentDay, setCurrentDay] = useState(localDateKey());
+  const [currentDay, setCurrentDay] = useState('');
 
   const todayTotal = todayTasks.length;
   const todayDone = todayTasks.filter((t) => t.status === 'done').length;
@@ -46,7 +50,7 @@ export default function Page() {
   }
 
   async function loadToday() {
-    const today = localDateKey();
+    const today = todayKey();
     const { data, error } = await supabase
       .from('tasks')
       .select('*')
@@ -83,6 +87,7 @@ export default function Page() {
   }
 
   useEffect(() => {
+    setCurrentDay(todayKey());
     refreshAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -90,7 +95,7 @@ export default function Page() {
   // Check every minute for day change
   useEffect(() => {
     const timer = setInterval(() => {
-      const nowDay = localDateKey();
+      const nowDay = todayKey();
       if (nowDay !== currentDay) {
         setCurrentDay(nowDay);
         refreshAll();
@@ -110,7 +115,7 @@ export default function Page() {
     try {
       const { error } = await supabase.from('tasks').insert({
         title,
-        due_date: localDateKey(),
+        due_date: todayKey(),
         status: 'open',
       });
       if (error) throw error;
