@@ -23,8 +23,15 @@ function addDaysToKey(key, days) {
 
 function dueDateKey(value) {
   if (!value) return '';
-  // Normalizes both "YYYY-MM-DD" and ISO datetime strings
   return String(value).slice(0, 10);
+}
+
+function isOverdueTask(task, todayKey) {
+  if (!todayKey) return false;
+  if (task?.completed_at) return false;
+  const key = dueDateKey(task?.due_date);
+  if (!key) return false;
+  return key < todayKey;
 }
 
 function quoteForDay(dayKey) {
@@ -50,6 +57,24 @@ function titleCaseEntryType(type) {
   if (t === 'reminder') return 'Reminder';
   if (t === 'appointment') return 'Appointment';
   return 'Task';
+}
+
+function meterStrokeClass(tone) {
+  if (tone === 'green') return 'text-emerald-400';
+  if (tone === 'purple') return 'text-purple-400';
+  return 'text-red-400';
+}
+
+function meterLabelClass(tone) {
+  if (tone === 'green') return 'text-emerald-500/80';
+  if (tone === 'purple') return 'text-purple-400/90';
+  return 'text-red-400/90';
+}
+
+function meterValueClass(tone) {
+  if (tone === 'green') return 'text-emerald-200';
+  if (tone === 'purple') return 'text-purple-200';
+  return 'text-red-200';
 }
 
 export default function Page() {
@@ -135,10 +160,9 @@ export default function Page() {
     if (key === todayKey) return 'today';
     if (key === tomorrowKey) return 'tomorrow';
     if (key > tomorrowKey) return 'later';
-    return 'today'; // past due stays in today
+    return 'today';
   }
 
-  // Source of truth for completion = completed_at
   const openTasks = useMemo(() => tasks.filter((t) => !t.completed_at), [tasks]);
 
   const filteredOpenTasks = useMemo(() => {
@@ -176,14 +200,33 @@ export default function Page() {
       .sort((a, b) => new Date(b.completed_at).getTime() - new Date(a.completed_at).getTime());
   }, [tasks, todayKey]);
 
+  // Meter 1: Due Today completion
   const todayDueAll = useMemo(() => {
     if (!todayKey) return [];
     return tasks.filter((t) => dueDateKey(t.due_date) === todayKey);
   }, [tasks, todayKey]);
-
   const todayDueDone = todayDueAll.filter((t) => !!t.completed_at).length;
   const todayDueTotal = todayDueAll.length;
-  const progressPct = todayDueTotal === 0 ? 0 : Math.round((todayDueDone / todayDueTotal) * 100);
+  const dueTodayPct = todayDueTotal === 0 ? 0 : Math.round((todayDueDone / todayDueTotal) * 100);
+
+  // Meter 2: Done Today over "today activity" (due today + completed today union)
+  const doneTodayCount = completedTodayTasks.length;
+  const todayActivityTotal = useMemo(() => {
+    const ids = new Set();
+    todayDueAll.forEach((t) => ids.add(t.id));
+    completedTodayTasks.forEach((t) => ids.add(t.id));
+    return ids.size;
+  }, [todayDueAll, completedTodayTasks]);
+  const doneTodayPct =
+    todayActivityTotal === 0 ? 0 : Math.round((doneTodayCount / todayActivityTotal) * 100);
+
+  // Meter 3: Overdue open over all open tasks
+  const overdueOpenCount = useMemo(
+    () => openTasks.filter((t) => isOverdueTask(t, todayKey)).length,
+    [openTasks, todayKey]
+  );
+  const openTotal = openTasks.length;
+  const overduePct = openTotal === 0 ? 0 : Math.round((overdueOpenCount / openTotal) * 100);
 
   const allCategories = useMemo(() => {
     const base = ['Personal', 'Work', 'Health', 'Family', 'Finance', 'Personal Growth', 'Other'];
@@ -227,8 +270,6 @@ export default function Page() {
     setError(null);
     try {
       const nextCompletedAt = task.completed_at ? null : new Date().toISOString();
-
-      // Intentionally update only completed_at (avoids status constraint issues)
       const { error } = await supabase
         .from('tasks')
         .update({
@@ -297,14 +338,58 @@ export default function Page() {
     }
   }
 
-  const radius = 44;
-  const circumference = 2 * Math.PI * radius;
-  const dash = circumference * (progressPct / 100);
-
   function priorityClasses(priority) {
     if (priority === 'High') return 'bg-red-500/20 text-red-300 border-red-400/40';
     if (priority === 'Low') return 'bg-sky-500/20 text-sky-300 border-sky-400/40';
     return 'bg-amber-500/20 text-amber-300 border-amber-400/40';
+  }
+
+  function renderMeter({ tone, label, pct, numerator, denominator }) {
+    const radius = 36;
+    const circumference = 2 * Math.PI * radius;
+    const dash = circumference * (Math.max(0, Math.min(100, pct)) / 100);
+
+    return (
+      <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
+        <div className="flex items-center gap-4">
+          <div className="relative h-20 w-20">
+            <svg className="h-20 w-20 -rotate-90">
+              <circle
+                cx="40"
+                cy="40"
+                r={radius}
+                stroke="currentColor"
+                strokeWidth="8"
+                className="text-zinc-800"
+                fill="none"
+              />
+              <circle
+                cx="40"
+                cy="40"
+                r={radius}
+                stroke="currentColor"
+                strokeWidth="8"
+                className={meterStrokeClass(tone)}
+                fill="none"
+                strokeLinecap="round"
+                strokeDasharray={`${dash} ${circumference - dash}`}
+              />
+            </svg>
+            <div className="absolute inset-0 grid place-items-center text-center">
+              <div>
+                <div className={`text-lg font-semibold ${meterValueClass(tone)}`}>{pct}%</div>
+                <div className="text-xs text-zinc-400">
+                  {numerator}/{denominator}
+                </div>
+              </div>
+            </div>
+          </div>
+          <div>
+            <p className={`text-sm ${meterLabelClass(tone)}`}>{label}</p>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   const dailyQuote = quoteForDay(todayKey);
@@ -352,48 +437,28 @@ export default function Page() {
 
         {tab === 'today' && (
           <section className="space-y-6">
-            <div className="rounded-xl border border-emerald-500/20 bg-zinc-950 p-4 shadow-lg shadow-emerald-500/10">
-              <div className="flex flex-col items-start gap-4 md:flex-row md:items-center">
-                <div className="relative h-28 w-28">
-                  <svg className="h-28 w-28 -rotate-90">
-                    <circle
-                      cx="56"
-                      cy="56"
-                      r={radius}
-                      stroke="currentColor"
-                      strokeWidth="10"
-                      className="text-zinc-800"
-                      fill="none"
-                    />
-                    <circle
-                      cx="56"
-                      cy="56"
-                      r={radius}
-                      stroke="currentColor"
-                      strokeWidth="10"
-                      className="text-emerald-400"
-                      fill="none"
-                      strokeLinecap="round"
-                      strokeDasharray={`${dash} ${circumference - dash}`}
-                    />
-                  </svg>
-                  <div className="absolute inset-0 grid place-items-center text-center">
-                    <div>
-                      <div className="text-xl font-semibold text-emerald-300">{progressPct}%</div>
-                      <div className="text-xs text-emerald-500/80">
-                        {todayDueDone}/{todayDueTotal}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div>
-                  <p className="text-sm text-emerald-500/80">Daily Progress (Due Today)</p>
-                  <p className="text-lg font-medium text-emerald-200">
-                    {todayDueDone} done, {Math.max(todayDueTotal - todayDueDone, 0)} left
-                  </p>
-                </div>
-              </div>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              {renderMeter({
+                tone: 'green',
+                label: 'Due Today Progress',
+                pct: dueTodayPct,
+                numerator: todayDueDone,
+                denominator: todayDueTotal,
+              })}
+              {renderMeter({
+                tone: 'purple',
+                label: 'Done Today Progress',
+                pct: doneTodayPct,
+                numerator: doneTodayCount,
+                denominator: todayActivityTotal,
+              })}
+              {renderMeter({
+                tone: 'red',
+                label: 'Overdue (Not Done)',
+                pct: overduePct,
+                numerator: overdueOpenCount,
+                denominator: openTotal,
+              })}
             </div>
 
             <form onSubmit={addTask} className="rounded-xl border border-emerald-500/20 bg-zinc-950 p-4">
@@ -404,7 +469,6 @@ export default function Page() {
                   placeholder="Add a task..."
                   className="md:col-span-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
                 />
-
                 <select
                   value={newEntryType}
                   onChange={(e) => setNewEntryType(e.target.value)}
@@ -415,7 +479,6 @@ export default function Page() {
                   <option value="reminder">Reminder</option>
                   <option value="appointment">Appointment</option>
                 </select>
-
                 <select
                   value={newCategory}
                   onChange={(e) => setNewCategory(e.target.value)}
@@ -427,7 +490,6 @@ export default function Page() {
                     </option>
                   ))}
                 </select>
-
                 <select
                   value={newPriority}
                   onChange={(e) => setNewPriority(e.target.value)}
@@ -437,14 +499,12 @@ export default function Page() {
                   <option>Medium</option>
                   <option>Low</option>
                 </select>
-
                 <input
                   type="date"
                   value={newDueDate}
                   onChange={(e) => setNewDueDate(e.target.value)}
                   className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
                 />
-
                 <button
                   type="submit"
                   disabled={saving || !todayKey}
@@ -503,115 +563,134 @@ export default function Page() {
                 ) : filteredOpenTasks.length === 0 ? (
                   <li className="px-4 py-3 text-sm text-zinc-400">No tasks in this view.</li>
                 ) : (
-                  filteredOpenTasks.map((task) => (
-                    <li key={task.id} className="border-t border-zinc-800 px-4 py-3">
-                      {editingId === task.id ? (
-                        <div className="grid grid-cols-1 gap-2 md:grid-cols-7">
-                          <input
-                            value={editTaskTitle}
-                            onChange={(e) => setEditTaskTitle(e.target.value)}
-                            className="md:col-span-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
-                          />
-                          <select
-                            value={editEntryType}
-                            onChange={(e) => setEditEntryType(e.target.value)}
-                            className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
-                          >
-                            <option value="task">Task</option>
-                            <option value="event">Event</option>
-                            <option value="reminder">Reminder</option>
-                            <option value="appointment">Appointment</option>
-                          </select>
-                          <select
-                            value={editCategory}
-                            onChange={(e) => setEditCategory(e.target.value)}
-                            className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
-                          >
-                            {allCategories.map((c) => (
-                              <option key={c} value={c}>
-                                {c}
-                              </option>
-                            ))}
-                          </select>
-                          <select
-                            value={editPriority}
-                            onChange={(e) => setEditPriority(e.target.value)}
-                            className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
-                          >
-                            <option>High</option>
-                            <option>Medium</option>
-                            <option>Low</option>
-                          </select>
-                          <input
-                            type="date"
-                            value={editDueDate}
-                            onChange={(e) => setEditDueDate(e.target.value)}
-                            className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
-                          />
-                          <div className="flex gap-2">
-                            <button
-                              onClick={() => saveEdit(task.id)}
-                              className="rounded-md bg-emerald-500 px-3 py-2 text-xs font-semibold text-black hover:bg-emerald-400"
-                            >
-                              Save
-                            </button>
-                            <button
-                              onClick={cancelEdit}
-                              className="rounded-md bg-zinc-800 px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-700"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                          <div className="flex items-start gap-3">
+                  filteredOpenTasks.map((task) => {
+                    const overdue = isOverdueTask(task, todayKey);
+                    return (
+                      <li
+                        key={task.id}
+                        className={`border-t px-4 py-3 ${
+                          overdue ? 'border-red-500/40 bg-red-500/5' : 'border-zinc-800'
+                        }`}
+                      >
+                        {editingId === task.id ? (
+                          <div className="grid grid-cols-1 gap-2 md:grid-cols-7">
                             <input
-                              type="checkbox"
-                              checked={false}
-                              onChange={() => toggleDone(task)}
-                              className="mt-1 h-4 w-4"
+                              value={editTaskTitle}
+                              onChange={(e) => setEditTaskTitle(e.target.value)}
+                              className="md:col-span-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
                             />
-                            <div>
-                              <div className="text-base text-emerald-100">{task.title}</div>
-                              <div className="mt-1 flex flex-wrap gap-2 text-xs">
-                                <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 text-cyan-300">
-                                  {titleCaseEntryType(task.entry_type)}
-                                </span>
-                                <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-emerald-300">
-                                  {task.category || 'Uncategorized'}
-                                </span>
-                                <span
-                                  className={`rounded border px-2 py-0.5 ${priorityClasses(
-                                    task.priority || 'Medium'
-                                  )}`}
-                                >
-                                  {task.priority || 'Medium'}
-                                </span>
-                                <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
-                                  Due: {dueDateKey(task.due_date) || '—'}
-                                </span>
-                              </div>
+                            <select
+                              value={editEntryType}
+                              onChange={(e) => setEditEntryType(e.target.value)}
+                              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                            >
+                              <option value="task">Task</option>
+                              <option value="event">Event</option>
+                              <option value="reminder">Reminder</option>
+                              <option value="appointment">Appointment</option>
+                            </select>
+                            <select
+                              value={editCategory}
+                              onChange={(e) => setEditCategory(e.target.value)}
+                              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                            >
+                              {allCategories.map((c) => (
+                                <option key={c} value={c}>
+                                  {c}
+                                </option>
+                              ))}
+                            </select>
+                            <select
+                              value={editPriority}
+                              onChange={(e) => setEditPriority(e.target.value)}
+                              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                            >
+                              <option>High</option>
+                              <option>Medium</option>
+                              <option>Low</option>
+                            </select>
+                            <input
+                              type="date"
+                              value={editDueDate}
+                              onChange={(e) => setEditDueDate(e.target.value)}
+                              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                            />
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => saveEdit(task.id)}
+                                className="rounded-md bg-emerald-500 px-3 py-2 text-xs font-semibold text-black hover:bg-emerald-400"
+                              >
+                                Save
+                              </button>
+                              <button
+                                onClick={cancelEdit}
+                                className="rounded-md bg-zinc-800 px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-700"
+                              >
+                                Cancel
+                              </button>
                             </div>
                           </div>
-                          <div className="flex gap-2">
-                            <button
-                              onClick={() => startEdit(task)}
-                              className="rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
-                            >
-                              Edit
-                            </button>
-                            <button
-                              onClick={() => deleteTask(task.id)}
-                              className="rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
-                            >
-                              Delete
-                            </button>
+                        ) : (
+                          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                            <div className="flex items-start gap-3">
+                              <input
+                                type="checkbox"
+                                checked={false}
+                                onChange={() => toggleDone(task)}
+                                className="mt-1 h-4 w-4"
+                              />
+                              <div>
+                                <div className="text-base text-emerald-100">{task.title}</div>
+                                <div className="mt-1 flex flex-wrap gap-2 text-xs">
+                                  <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 text-cyan-300">
+                                    {titleCaseEntryType(task.entry_type)}
+                                  </span>
+                                  <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-emerald-300">
+                                    {task.category || 'Uncategorized'}
+                                  </span>
+                                  <span
+                                    className={`rounded border px-2 py-0.5 ${priorityClasses(
+                                      task.priority || 'Medium'
+                                    )}`}
+                                  >
+                                    {task.priority || 'Medium'}
+                                  </span>
+                                  <span
+                                    className={`rounded border px-2 py-0.5 ${
+                                      overdue
+                                        ? 'border-red-400/40 bg-red-500/20 text-red-200'
+                                        : 'border-zinc-700 bg-zinc-900 text-zinc-300'
+                                    }`}
+                                  >
+                                    Due: {dueDateKey(task.due_date) || '—'}
+                                  </span>
+                                  {overdue && (
+                                    <span className="rounded border border-red-400/50 bg-red-600/30 px-2 py-0.5 text-red-100">
+                                      Overdue
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => startEdit(task)}
+                                className="rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => deleteTask(task.id)}
+                                className="rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
+                              >
+                                Delete
+                              </button>
+                            </div>
                           </div>
-                        </div>
-                      )}
-                    </li>
-                  ))
+                        )}
+                      </li>
+                    );
+                  })
                 )}
               </ul>
             </div>
