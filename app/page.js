@@ -1,645 +1,671 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { supabase } from '../lib/supabase';
 
-export default function LifeHQPage() {
-  const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-  const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+function localDateKey(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
 
-  const [items, setItems] = useState([]);
+function parseDateKey(key) {
+  const [y, m, d] = key.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function addDaysToKey(key, days) {
+  const base = parseDateKey(key);
+  base.setDate(base.getDate() + days);
+  return localDateKey(base);
+}
+
+function fourteenDaysAgoISO() {
+  return new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function quoteForDay(dayKey) {
+  const quotes = [
+    'Small wins stack into big victories.',
+    'Discipline beats motivation when motivation fades.',
+    'Do it tired. Do it messy. Just do it.',
+    'Momentum is built one completed task at a time.',
+    'Focus on progress, not perfection.',
+    'Your future is hidden in your daily routine.',
+    'Consistency is the real superpower.',
+    'Start where you are. Use what you have.',
+    'Hard days build strong habits.',
+    'The goal is not to feel good first — act first.',
+  ];
+  const seed = (dayKey || '').split('').reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
+  return quotes[seed % quotes.length];
+}
+
+export default function Page() {
+  const [tab, setTab] = useState('today');
+  const [dueTab, setDueTab] = useState('today');
+  const [categoryFilter, setCategoryFilter] = useState('all');
+
+  const [currentDay, setCurrentDay] = useState('');
+  const [newTask, setNewTask] = useState('');
+  const [newCategory, setNewCategory] = useState('Personal');
+  const [newPriority, setNewPriority] = useState('Medium');
+  const [newDueDate, setNewDueDate] = useState('');
+
+  const [tasks, setTasks] = useState([]);
+  const [archiveTasks, setArchiveTasks] = useState([]);
+
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('today');
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
-
-  const [todayStr, setTodayStr] = useState('');
-  const [tomorrowStr, setTomorrowStr] = useState('');
-
-  const [form, setForm] = useState({
-    title: '',
-    category: '',
-    priority: 'medium',
-    due_date: '',
-    entry_type: 'task',
-  });
+  const [error, setError] = useState(null);
 
   const [editingId, setEditingId] = useState(null);
-  const [editForm, setEditForm] = useState({
-    title: '',
-    category: '',
-    priority: 'medium',
-    due_date: '',
-    entry_type: 'task',
-  });
+  const [editTaskTitle, setEditTaskTitle] = useState('');
+  const [editCategory, setEditCategory] = useState('Personal');
+  const [editPriority, setEditPriority] = useState('Medium');
+  const [editDueDate, setEditDueDate] = useState('');
 
-  const hasSupabaseConfig = SUPABASE_URL && SUPABASE_ANON_KEY;
+  // IMPORTANT: no new Date() in render path
+  const todayKey = currentDay;
+  const tomorrowKey = currentDay ? addDaysToKey(currentDay, 1) : '';
+
+  async function runRollover() {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    const { error } = await supabase.rpc('archive_rollover', { p_tz: tz });
+    if (error) throw error;
+  }
+
+  async function loadTasks() {
+    const { data, error } = await supabase
+      .from('tasks')
+      .select('*')
+      .in('status', ['open', 'done'])
+      .order('due_date', { ascending: true })
+      .order('created_at', { ascending: true });
+
+    if (error) throw error;
+    setTasks(data || []);
+  }
+
+  async function loadArchive() {
+    const { data, error } = await supabase
+      .from('tasks')
+      .select('*')
+      .eq('status', 'archived')
+      .gte('archived_at', fourteenDaysAgoISO())
+      .order('archived_at', { ascending: false });
+
+    if (error) throw error;
+    setArchiveTasks(data || []);
+  }
+
+  async function refreshAll() {
+    setError(null);
+    try {
+      await runRollover();
+      await Promise.all([loadTasks(), loadArchive()]);
+    } catch (e) {
+      setError(e?.message || 'Failed to load data.');
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
-    const now = new Date();
-    setTodayStr(toDateInputValue(now));
-    const tm = new Date(now);
-    tm.setDate(tm.getDate() + 1);
-    setTomorrowStr(toDateInputValue(tm));
-  }, []);
-
-  useEffect(() => {
-    loadItems();
+    const key = localDateKey(new Date());
+    setCurrentDay(key);
+    setNewDueDate(key);
+    refreshAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function supabaseRequest(path, options = {}) {
-    const res = await fetch(`${SUPABASE_URL}${path}`, {
-      ...options,
-      headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-        'Content-Type': 'application/json',
-        Prefer: 'return=representation',
-        ...(options.headers || {}),
-      },
-      cache: 'no-store',
-    });
+  useEffect(() => {
+    if (!currentDay) return;
 
-    if (!res.ok) {
-      const txt = await res.text();
-      throw new Error(txt || 'Request failed');
-    }
+    const timer = setInterval(() => {
+      const nowDay = localDateKey(new Date());
+      if (nowDay !== currentDay) {
+        setCurrentDay(nowDay);
+        setNewDueDate(nowDay);
+        refreshAll();
+      }
+    }, 60_000);
 
-    const ct = res.headers.get('content-type') || '';
-    if (ct.includes('application/json')) return res.json();
-    return null;
+    return () => clearInterval(timer);
+  }, [currentDay]);
+
+  function bucketForDueDate(dueDate) {
+    if (!todayKey || !tomorrowKey) return 'today';
+    if (dueDate === todayKey) return 'today';
+    if (dueDate === tomorrowKey) return 'tomorrow';
+    if (dueDate > tomorrowKey) return 'later';
+    return 'today';
   }
 
-  async function loadItems() {
-    if (!hasSupabaseConfig) {
-      setError('Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY');
-      setLoading(false);
-      return;
-    }
+  const openTasks = useMemo(() => tasks.filter((t) => t.status === 'open'), [tasks]);
 
-    try {
-      setLoading(true);
-      setError('');
-
-      await supabaseRequest('/rest/v1/rpc/normalize_overdue', {
-        method: 'POST',
-        body: JSON.stringify({}),
-      });
-
-      const data = await supabaseRequest(
-        '/rest/v1/tasks?select=id,title,category,priority,due_date,entry_type,status,created_at,completed_at&order=due_date.asc.nullslast,created_at.desc'
-      );
-
-      setItems(Array.isArray(data) ? data : []);
-    } catch (e) {
-      setError(e.message || 'Failed to load items');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function deriveStatus(item) {
-    if (item.completed_at) return 'completed';
-    if (todayStr && item.due_date && item.due_date < todayStr) return 'overdue';
-    return item.status || 'open';
-  }
-
-  const normalizedItems = useMemo(
-    () =>
-      items.map((i) => ({
-        ...i,
-        status: deriveStatus(i),
-      })),
-    [items, todayStr]
-  );
-
-  const dueTodayItems = useMemo(() => {
-    if (!todayStr) return [];
-    return normalizedItems.filter((i) => {
-      if (i.status === 'completed') return false;
-      return i.due_date === todayStr || i.status === 'overdue';
+  const filteredOpenTasks = useMemo(() => {
+    return openTasks.filter((t) => {
+      const inDueBucket = bucketForDueDate(t.due_date) === dueTab;
+      const inCategory =
+        categoryFilter === 'all' ? true : (t.category || 'Uncategorized') === categoryFilter;
+      return inDueBucket && inCategory;
     });
-  }, [normalizedItems, todayStr]);
+  }, [openTasks, dueTab, categoryFilter, todayKey, tomorrowKey]);
 
-  const dueTomorrowItems = useMemo(() => {
-    if (!tomorrowStr) return [];
-    return normalizedItems.filter(
-      (i) => i.status !== 'completed' && i.due_date === tomorrowStr
-    );
-  }, [normalizedItems, tomorrowStr]);
-
-  const beyondTomorrowItems = useMemo(() => {
-    if (!tomorrowStr) return [];
-    return normalizedItems.filter((i) => {
-      if (i.status === 'completed') return false;
-      if (!i.due_date) return false;
-      return i.due_date > tomorrowStr;
+  const completedTodayTasks = useMemo(() => {
+    if (!todayKey) return [];
+    return tasks.filter((t) => {
+      if (t.status !== 'done' || !t.completed_at) return false;
+      const completedDay = localDateKey(new Date(t.completed_at));
+      const inCategory =
+        categoryFilter === 'all' ? true : (t.category || 'Uncategorized') === categoryFilter;
+      return completedDay === todayKey && inCategory;
     });
-  }, [normalizedItems, tomorrowStr]);
+  }, [tasks, todayKey, categoryFilter]);
 
-  const completedItems = normalizedItems.filter((i) => i.status === 'completed');
+  const todayDueAll = useMemo(() => {
+    if (!todayKey) return [];
+    return tasks.filter((t) => t.due_date === todayKey);
+  }, [tasks, todayKey]);
 
-  const visibleItems =
-    activeTab === 'today'
-      ? dueTodayItems
-      : activeTab === 'tomorrow'
-      ? dueTomorrowItems
-      : beyondTomorrowItems;
+  const todayDueDone = todayDueAll.filter((t) => t.status === 'done').length;
+  const todayDueTotal = todayDueAll.length;
+  const progressPct = todayDueTotal === 0 ? 0 : Math.round((todayDueDone / todayDueTotal) * 100);
 
-  const todayAll = useMemo(() => {
-    if (!todayStr) return [];
-    return normalizedItems.filter(
-      (i) => i.due_date === todayStr || (i.status === 'overdue' && !i.completed_at)
-    );
-  }, [normalizedItems, todayStr]);
+  const allCategories = useMemo(() => {
+    const base = ['Personal', 'Work', 'Health', 'Family', 'Finance'];
+    const fromTasks = tasks.map((t) => t.category || 'Uncategorized').filter(Boolean);
+    return Array.from(new Set([...base, ...fromTasks]));
+  }, [tasks]);
 
-  const todayCompleted = todayAll.filter((i) => i.status === 'completed').length;
-  const progress = todayAll.length ? Math.round((todayCompleted / todayAll.length) * 100) : 0;
-
-  async function addItem(e) {
+  async function addTask(e) {
     e.preventDefault();
-    if (!form.title.trim()) return;
+    const title = newTask.trim();
+    if (!title || !todayKey) return;
 
+    setSaving(true);
+    setError(null);
     try {
-      setSaving(true);
-      setError('');
+      const payload = {
+        title,
+        category: newCategory || 'Personal',
+        priority: newPriority || 'Medium',
+        due_date: newDueDate || todayKey,
+        status: 'open',
+      };
 
-      await supabaseRequest('/rest/v1/tasks', {
-        method: 'POST',
-        body: JSON.stringify([
-          {
-            title: form.title.trim(),
-            category: form.category.trim() || null,
-            priority: form.priority,
-            due_date: form.due_date || null,
-            entry_type: form.entry_type,
-            completed_at: null,
-            status: 'open',
-          },
-        ]),
-      });
+      const { error } = await supabase.from('tasks').insert(payload);
+      if (error) throw error;
 
-      setForm({
-        title: '',
-        category: '',
-        priority: 'medium',
-        due_date: '',
-        entry_type: 'task',
-      });
-
-      await loadItems();
-    } catch (e2) {
-      setError(e2.message || 'Failed to add item');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  function startEdit(item) {
-    setEditingId(item.id);
-    setEditForm({
-      title: item.title || '',
-      category: item.category || '',
-      priority: item.priority || 'medium',
-      due_date: item.due_date || '',
-      entry_type: item.entry_type || 'task',
-    });
-  }
-
-  async function saveEdit(id) {
-    try {
-      setSaving(true);
-      setError('');
-
-      await supabaseRequest(`/rest/v1/tasks?id=eq.${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          title: editForm.title.trim(),
-          category: editForm.category.trim() || null,
-          priority: editForm.priority,
-          due_date: editForm.due_date || null,
-          entry_type: editForm.entry_type,
-        }),
-      });
-
-      setEditingId(null);
-      await loadItems();
+      setNewTask('');
+      setNewCategory('Personal');
+      setNewPriority('Medium');
+      setNewDueDate(todayKey);
+      await loadTasks();
     } catch (e) {
-      setError(e.message || 'Failed to update item');
+      setError(e?.message || 'Failed to add task.');
     } finally {
       setSaving(false);
     }
   }
 
-  async function markCompleted(item) {
+  async function toggleDone(task) {
+    setError(null);
     try {
-      setSaving(true);
-      setError('');
+      const nextDone = task.status !== 'done';
+      const { error } = await supabase
+        .from('tasks')
+        .update({
+          status: nextDone ? 'done' : 'open',
+          completed_at: nextDone ? new Date().toISOString() : null,
+        })
+        .eq('id', task.id);
 
-      await supabaseRequest(`/rest/v1/tasks?id=eq.${item.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          completed_at: new Date().toISOString(),
-          status: 'completed',
-        }),
-      });
-
-      await loadItems();
+      if (error) throw error;
+      await loadTasks();
     } catch (e) {
-      setError(e.message || 'Failed to mark completed');
-    } finally {
-      setSaving(false);
+      setError(e?.message || 'Failed to update task.');
     }
   }
 
-  async function reopenItem(item) {
+  async function deleteTask(taskId) {
+    setError(null);
     try {
-      setSaving(true);
-      setError('');
-
-      await supabaseRequest(`/rest/v1/tasks?id=eq.${item.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          completed_at: null,
-          status: 'open',
-        }),
-      });
-
-      await loadItems();
+      const { error } = await supabase.from('tasks').delete().eq('id', taskId);
+      if (error) throw error;
+      await Promise.all([loadTasks(), loadArchive()]);
     } catch (e) {
-      setError(e.message || 'Failed to reopen item');
-    } finally {
-      setSaving(false);
+      setError(e?.message || 'Failed to delete task.');
     }
   }
 
-  async function deleteItem(id) {
+  function startEdit(task) {
+    setEditingId(task.id);
+    setEditTaskTitle(task.title || '');
+    setEditCategory(task.category || 'Personal');
+    setEditPriority(task.priority || 'Medium');
+    setEditDueDate(task.due_date || todayKey);
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setEditTaskTitle('');
+    setEditCategory('Personal');
+    setEditPriority('Medium');
+    setEditDueDate('');
+  }
+
+  async function saveEdit(taskId) {
+    const title = editTaskTitle.trim();
+    if (!title || !todayKey) return;
+
+    setError(null);
     try {
-      setSaving(true);
-      setError('');
+      const { error } = await supabase
+        .from('tasks')
+        .update({
+          title,
+          category: editCategory || 'Personal',
+          priority: editPriority || 'Medium',
+          due_date: editDueDate || todayKey,
+        })
+        .eq('id', taskId);
 
-      await supabaseRequest(`/rest/v1/tasks?id=eq.${id}`, {
-        method: 'DELETE',
-        headers: { Prefer: 'return=minimal' },
-      });
-
-      await loadItems();
+      if (error) throw error;
+      cancelEdit();
+      await loadTasks();
     } catch (e) {
-      setError(e.message || 'Failed to delete item');
-    } finally {
-      setSaving(false);
+      setError(e?.message || 'Failed to save task edits.');
     }
   }
 
-  function TabButton({ active = false, onClick = () => {}, label = '', count = 0 }) {
-    return (
-      <button
-        onClick={onClick}
-        className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
-          active ? 'bg-purple-600 text-white' : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
-        }`}
-        type="button"
-      >
-        {label} ({count})
-      </button>
-    );
+  const radius = 44;
+  const circumference = 2 * Math.PI * radius;
+  const dash = circumference * (progressPct / 100);
+
+  function priorityClasses(priority) {
+    if (priority === 'High') return 'bg-red-500/20 text-red-300 border-red-400/40';
+    if (priority === 'Low') return 'bg-sky-500/20 text-sky-300 border-sky-400/40';
+    return 'bg-amber-500/20 text-amber-300 border-amber-400/40';
   }
 
-  function StatusBadge({ status = 'open' }) {
-    const base = 'inline-block rounded-full px-2 py-1 text-xs font-semibold mt-2';
-    if (status === 'completed') {
-      return <span className={`${base} bg-emerald-900 text-emerald-200`}>Completed</span>;
-    }
-    if (status === 'overdue') {
-      return <span className={`${base} bg-red-900 text-red-200`}>Overdue</span>;
-    }
-    return <span className={`${base} bg-slate-700 text-slate-200`}>Open</span>;
-  }
-
-  function ProgressRing({ percent = 0 }) {
-    const radius = 30;
-    const stroke = 8;
-    const normalizedRadius = radius - stroke / 2;
-    const circumference = normalizedRadius * 2 * Math.PI;
-    const strokeDashoffset = circumference - (percent / 100) * circumference;
-
-    return (
-      <svg height={radius * 2} width={radius * 2} className="shrink-0">
-        <circle
-          stroke="#334155"
-          fill="transparent"
-          strokeWidth={stroke}
-          r={normalizedRadius}
-          cx={radius}
-          cy={radius}
-        />
-        <circle
-          stroke="#a855f7"
-          fill="transparent"
-          strokeWidth={stroke}
-          strokeLinecap="round"
-          strokeDasharray={`${circumference} ${circumference}`}
-          style={{ strokeDashoffset }}
-          r={normalizedRadius}
-          cx={radius}
-          cy={radius}
-          transform={`rotate(-90 ${radius} ${radius})`}
-        />
-      </svg>
-    );
-  }
+  const dailyQuote = quoteForDay(todayKey);
 
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6 lg:px-8">
-        <header className="mb-6">
-          <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">Rich&apos;s Life HQ</h1>
-          <p className="mt-2 text-slate-300">
-            “Small daily discipline compounds into a life you’re proud of.”
-          </p>
+    <main className="min-h-screen bg-black text-emerald-100">
+      <div className="mx-auto w-full max-w-5xl px-4 py-8">
+        <header className="mb-6 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h1 className="text-3xl font-bold tracking-wide text-emerald-300 drop-shadow-sm">
+              Rich&apos;s Life HQ
+            </h1>
+            <p className="mt-2 text-sm text-emerald-400/90 italic">“{dailyQuote}”</p>
+          </div>
+
+          <div className="flex gap-2">
+            <button
+              onClick={() => setTab('today')}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                tab === 'today'
+                  ? 'bg-emerald-500 text-black shadow-md shadow-emerald-500/30'
+                  : 'bg-zinc-900 text-emerald-300 hover:bg-zinc-800'
+              }`}
+            >
+              Today
+            </button>
+            <button
+              onClick={() => setTab('archive')}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                tab === 'archive'
+                  ? 'bg-emerald-500 text-black shadow-md shadow-emerald-500/30'
+                  : 'bg-zinc-900 text-emerald-300 hover:bg-zinc-800'
+              }`}
+            >
+              Archive (14d)
+            </button>
+          </div>
         </header>
 
-        <section className="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
-          <div className="rounded-xl border border-slate-800 bg-slate-900 p-4 lg:col-span-2">
-            <h2 className="mb-3 text-lg font-semibold">Add Entry</h2>
-            <form onSubmit={addItem} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <input
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 outline-none ring-purple-500 focus:ring"
-                placeholder="Title"
-                value={form.title}
-                onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
-                required
-              />
-              <input
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 outline-none ring-purple-500 focus:ring"
-                placeholder="Category"
-                value={form.category}
-                onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}
-              />
-              <select
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 outline-none ring-purple-500 focus:ring"
-                value={form.entry_type}
-                onChange={(e) => setForm((f) => ({ ...f, entry_type: e.target.value }))}
-              >
-                <option value="task">Task</option>
-                <option value="event">Event</option>
-                <option value="reminder">Reminder</option>
-                <option value="appointment">Appointment</option>
-              </select>
-              <select
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 outline-none ring-purple-500 focus:ring"
-                value={form.priority}
-                onChange={(e) => setForm((f) => ({ ...f, priority: e.target.value }))}
-              >
-                <option value="low">Priority: Low</option>
-                <option value="medium">Priority: Medium</option>
-                <option value="high">Priority: High</option>
-              </select>
-              <input
-                type="date"
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 outline-none ring-purple-500 focus:ring sm:col-span-1"
-                value={form.due_date}
-                onChange={(e) => setForm((f) => ({ ...f, due_date: e.target.value }))}
-              />
-              <button
-                disabled={saving}
-                className="rounded-lg bg-purple-600 px-4 py-2 font-medium text-white transition hover:bg-purple-500 disabled:opacity-50"
-                type="submit"
-              >
-                {saving ? 'Saving...' : 'Add'}
-              </button>
-            </form>
-          </div>
-
-          <div className="rounded-xl border border-slate-800 bg-slate-900 p-4">
-            <h2 className="mb-2 text-lg font-semibold">Today Progress</h2>
-            <div className="flex items-center gap-4">
-              <ProgressRing percent={progress} />
-              <div>
-                <p className="text-2xl font-bold">{progress}%</p>
-                <p className="text-sm text-slate-300">
-                  {todayCompleted}/{todayAll.length} completed
-                </p>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section className="mb-6 rounded-xl border border-slate-800 bg-slate-900 p-4">
-          <div className="mb-4 flex flex-wrap gap-2">
-            <TabButton
-              active={activeTab === 'today'}
-              onClick={() => setActiveTab('today')}
-              label="Due Today"
-              count={dueTodayItems.length}
-            />
-            <TabButton
-              active={activeTab === 'tomorrow'}
-              onClick={() => setActiveTab('tomorrow')}
-              label="Due Tomorrow"
-              count={dueTomorrowItems.length}
-            />
-            <TabButton
-              active={activeTab === 'beyond'}
-              onClick={() => setActiveTab('beyond')}
-              label="Beyond Tomorrow"
-              count={beyondTomorrowItems.length}
-            />
-          </div>
-
-          {loading ? (
-            <p className="text-slate-300">Loading...</p>
-          ) : visibleItems.length === 0 ? (
-            <p className="text-slate-300">No entries in this view.</p>
-          ) : (
-            <div className="space-y-3">
-              {visibleItems.map((item) => {
-                const isOverdue = item.status === 'overdue';
-                const cardClass = isOverdue
-                  ? 'border-red-700 bg-red-950/30'
-                  : 'border-slate-800 bg-slate-950';
-
-                return (
-                  <div key={item.id} className={`rounded-lg border p-3 ${cardClass}`}>
-                    {editingId === item.id ? (
-                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                        <input
-                          className="rounded border border-slate-700 bg-slate-900 px-3 py-2"
-                          value={editForm.title}
-                          onChange={(e) => setEditForm((f) => ({ ...f, title: e.target.value }))}
-                        />
-                        <input
-                          className="rounded border border-slate-700 bg-slate-900 px-3 py-2"
-                          value={editForm.category}
-                          onChange={(e) => setEditForm((f) => ({ ...f, category: e.target.value }))}
-                          placeholder="Category"
-                        />
-                        <select
-                          className="rounded border border-slate-700 bg-slate-900 px-3 py-2"
-                          value={editForm.entry_type}
-                          onChange={(e) =>
-                            setEditForm((f) => ({ ...f, entry_type: e.target.value }))
-                          }
-                        >
-                          <option value="task">Task</option>
-                          <option value="event">Event</option>
-                          <option value="reminder">Reminder</option>
-                          <option value="appointment">Appointment</option>
-                        </select>
-                        <select
-                          className="rounded border border-slate-700 bg-slate-900 px-3 py-2"
-                          value={editForm.priority}
-                          onChange={(e) => setEditForm((f) => ({ ...f, priority: e.target.value }))}
-                        >
-                          <option value="low">Low</option>
-                          <option value="medium">Medium</option>
-                          <option value="high">High</option>
-                        </select>
-                        <input
-                          type="date"
-                          className="rounded border border-slate-700 bg-slate-900 px-3 py-2"
-                          value={editForm.due_date || ''}
-                          onChange={(e) => setEditForm((f) => ({ ...f, due_date: e.target.value }))}
-                        />
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => saveEdit(item.id)}
-                            className="rounded bg-emerald-600 px-3 py-2 text-sm font-medium hover:bg-emerald-500"
-                          >
-                            Save
-                          </button>
-                          <button
-                            onClick={() => setEditingId(null)}
-                            className="rounded bg-slate-700 px-3 py-2 text-sm font-medium hover:bg-slate-600"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                        <div>
-                          <p className="font-semibold">{item.title}</p>
-                          <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-slate-300">
-                            <span>{capitalize(item.entry_type)}</span>
-                            <span>•</span>
-                            <span>{item.category || 'No category'}</span>
-                            <span>•</span>
-                            <span
-                              className={`rounded-full px-2 py-0.5 text-xs font-semibold ${priorityBadgeClasses(item.priority)}`}
-                            >
-                              {capitalize(item.priority)}
-                            </span>
-                            <span>•</span>
-                            <span>Due: {item.due_date || 'No date'}</span>
-                          </div>
-                          <StatusBadge status={item.status} />
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          {item.status !== 'completed' ? (
-                            <button
-                              onClick={() => markCompleted(item)}
-                              className="rounded bg-emerald-600 px-3 py-2 text-sm font-medium hover:bg-emerald-500"
-                            >
-                              Complete
-                            </button>
-                          ) : (
-                            <button
-                              onClick={() => reopenItem(item)}
-                              className="rounded bg-amber-600 px-3 py-2 text-sm font-medium hover:bg-amber-500"
-                            >
-                              Reopen
-                            </button>
-                          )}
-                          <button
-                            onClick={() => startEdit(item)}
-                            className="rounded bg-blue-600 px-3 py-2 text-sm font-medium hover:bg-blue-500"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => deleteItem(item.id)}
-                            className="rounded bg-rose-700 px-3 py-2 text-sm font-medium hover:bg-rose-600"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
-
-        <section className="mb-6 rounded-xl border border-purple-800 bg-purple-950/30 p-4">
-          <h2 className="mb-3 text-lg font-semibold text-purple-100">Completed</h2>
-          {completedItems.length === 0 ? (
-            <p className="text-purple-200/80">No completed entries yet.</p>
-          ) : (
-            <div className="space-y-2">
-              {completedItems
-                .slice()
-                .sort((a, b) => (a.completed_at < b.completed_at ? 1 : -1))
-                .map((item) => (
-                  <div
-                    key={item.id}
-                    className="rounded-lg border border-purple-800 bg-purple-900/30 p-3"
-                  >
-                    <p className="font-medium">{item.title}</p>
-                    <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-purple-200/90">
-                      <span>{capitalize(item.entry_type)}</span>
-                      <span>•</span>
-                      <span>{item.category || 'No category'}</span>
-                      <span>•</span>
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-xs font-semibold ${priorityBadgeClasses(item.priority)}`}
-                      >
-                        {capitalize(item.priority)}
-                      </span>
-                      <span>•</span>
-                      <span>Completed: {formatDateTime(item.completed_at)}</span>
-                    </div>
-                  </div>
-                ))}
-            </div>
-          )}
-        </section>
-
-        {error ? (
-          <div className="mb-4 rounded-lg border border-rose-700 bg-rose-950/40 p-3 text-rose-100">
+        {error && (
+          <div className="mb-4 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
             {error}
           </div>
-        ) : null}
+        )}
 
-        <footer className="pt-2 text-center text-sm text-slate-400">Created by Rich Ruiz</footer>
+        {tab === 'today' && (
+          <section className="space-y-6">
+            <div className="rounded-xl border border-emerald-500/20 bg-zinc-950 p-4 shadow-lg shadow-emerald-500/10">
+              <div className="flex flex-col items-start gap-4 md:flex-row md:items-center">
+                <div className="relative h-28 w-28">
+                  <svg className="h-28 w-28 -rotate-90">
+                    <circle
+                      cx="56"
+                      cy="56"
+                      r={radius}
+                      stroke="currentColor"
+                      strokeWidth="10"
+                      className="text-zinc-800"
+                      fill="none"
+                    />
+                    <circle
+                      cx="56"
+                      cy="56"
+                      r={radius}
+                      stroke="currentColor"
+                      strokeWidth="10"
+                      className="text-emerald-400"
+                      fill="none"
+                      strokeLinecap="round"
+                      strokeDasharray={`${dash} ${circumference - dash}`}
+                    />
+                  </svg>
+                  <div className="absolute inset-0 grid place-items-center text-center">
+                    <div>
+                      <div className="text-xl font-semibold text-emerald-300">{progressPct}%</div>
+                      <div className="text-xs text-emerald-500/80">
+                        {todayDueDone}/{todayDueTotal}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <p className="text-sm text-emerald-500/80">Daily Progress (Due Today)</p>
+                  <p className="text-lg font-medium text-emerald-200">
+                    {todayDueDone} done, {Math.max(todayDueTotal - todayDueDone, 0)} left
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <form onSubmit={addTask} className="rounded-xl border border-emerald-500/20 bg-zinc-950 p-4">
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-6">
+                <input
+                  value={newTask}
+                  onChange={(e) => setNewTask(e.target.value)}
+                  placeholder="Add a task..."
+                  className="md:col-span-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                />
+
+                <select
+                  value={newCategory}
+                  onChange={(e) => setNewCategory(e.target.value)}
+                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                >
+                  {allCategories.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+
+                <select
+                  value={newPriority}
+                  onChange={(e) => setNewPriority(e.target.value)}
+                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                >
+                  <option>High</option>
+                  <option>Medium</option>
+                  <option>Low</option>
+                </select>
+
+                <input
+                  type="date"
+                  value={newDueDate}
+                  onChange={(e) => setNewDueDate(e.target.value)}
+                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                />
+
+                <button
+                  type="submit"
+                  disabled={saving || !todayKey}
+                  className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-black hover:bg-emerald-400 disabled:opacity-50"
+                >
+                  Add
+                </button>
+              </div>
+            </form>
+
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { key: 'today', label: 'Due Today' },
+                  { key: 'tomorrow', label: 'Due Tomorrow' },
+                  { key: 'later', label: 'Beyond Tomorrow' },
+                ].map((t) => (
+                  <button
+                    key={t.key}
+                    onClick={() => setDueTab(t.key)}
+                    className={`rounded-md px-3 py-1.5 text-sm transition ${
+                      dueTab === t.key
+                        ? 'bg-emerald-500 text-black'
+                        : 'bg-zinc-900 text-emerald-300 hover:bg-zinc-800'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-emerald-400/80">Filter:</span>
+                <select
+                  value={categoryFilter}
+                  onChange={(e) => setCategoryFilter(e.target.value)}
+                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                >
+                  <option value="all">All Categories</option>
+                  {allCategories.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-emerald-500/20 bg-zinc-950">
+              <div className="border-b border-zinc-800 px-4 py-3 text-sm font-semibold text-emerald-300">
+                Open Tasks
+              </div>
+              <ul>
+                {loading ? (
+                  <li className="px-4 py-3 text-sm text-zinc-400">Loading...</li>
+                ) : filteredOpenTasks.length === 0 ? (
+                  <li className="px-4 py-3 text-sm text-zinc-400">No tasks in this view.</li>
+                ) : (
+                  filteredOpenTasks.map((task) => (
+                    <li key={task.id} className="border-t border-zinc-800 px-4 py-3">
+                      {editingId === task.id ? (
+                        <div className="grid grid-cols-1 gap-2 md:grid-cols-6">
+                          <input
+                            value={editTaskTitle}
+                            onChange={(e) => setEditTaskTitle(e.target.value)}
+                            className="md:col-span-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                          />
+                          <select
+                            value={editCategory}
+                            onChange={(e) => setEditCategory(e.target.value)}
+                            className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                          >
+                            {allCategories.map((c) => (
+                              <option key={c} value={c}>
+                                {c}
+                              </option>
+                            ))}
+                          </select>
+                          <select
+                            value={editPriority}
+                            onChange={(e) => setEditPriority(e.target.value)}
+                            className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                          >
+                            <option>High</option>
+                            <option>Medium</option>
+                            <option>Low</option>
+                          </select>
+                          <input
+                            type="date"
+                            value={editDueDate}
+                            onChange={(e) => setEditDueDate(e.target.value)}
+                            className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                          />
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => saveEdit(task.id)}
+                              className="rounded-md bg-emerald-500 px-3 py-2 text-xs font-semibold text-black hover:bg-emerald-400"
+                            >
+                              Save
+                            </button>
+                            <button
+                              onClick={cancelEdit}
+                              className="rounded-md bg-zinc-800 px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-700"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                          <div className="flex items-start gap-3">
+                            <input
+                              type="checkbox"
+                              checked={false}
+                              onChange={() => toggleDone(task)}
+                              className="mt-1 h-4 w-4"
+                            />
+                            <div>
+                              <div className="text-base text-emerald-100">{task.title}</div>
+                              <div className="mt-1 flex flex-wrap gap-2 text-xs">
+                                <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-emerald-300">
+                                  {task.category || 'Uncategorized'}
+                                </span>
+                                <span
+                                  className={`rounded border px-2 py-0.5 ${priorityClasses(
+                                    task.priority || 'Medium'
+                                  )}`}
+                                >
+                                  {task.priority || 'Medium'}
+                                </span>
+                                <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
+                                  Due: {task.due_date}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => startEdit(task)}
+                              className="rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => deleteTask(task.id)}
+                              className="rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </li>
+                  ))
+                )}
+              </ul>
+            </div>
+
+            <div className="rounded-xl border border-purple-500/30 bg-purple-950/20">
+              <div className="border-b border-purple-500/20 px-4 py-3 text-sm font-semibold text-purple-300">
+                Completed Today
+              </div>
+              <ul>
+                {loading ? (
+                  <li className="px-4 py-3 text-sm text-zinc-400">Loading...</li>
+                ) : completedTodayTasks.length === 0 ? (
+                  <li className="px-4 py-3 text-sm text-zinc-400">No completed tasks yet.</li>
+                ) : (
+                  completedTodayTasks.map((task) => (
+                    <li
+                      key={task.id}
+                      className="flex flex-col gap-3 border-t border-purple-500/20 px-4 py-3 md:flex-row md:items-center md:justify-between"
+                    >
+                      <label className="flex items-start gap-3">
+                        <input
+                          type="checkbox"
+                          checked
+                          onChange={() => toggleDone(task)}
+                          className="mt-1 h-4 w-4"
+                        />
+                        <div>
+                          <div className="text-purple-200 line-through">{task.title}</div>
+                          <div className="mt-1 flex flex-wrap gap-2 text-xs">
+                            <span className="rounded border border-purple-400/40 bg-purple-500/10 px-2 py-0.5 text-purple-300">
+                              {task.category || 'Uncategorized'}
+                            </span>
+                            <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
+                              Priority: {task.priority || 'Medium'}
+                            </span>
+                            <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
+                              Due: {task.due_date}
+                            </span>
+                          </div>
+                        </div>
+                      </label>
+                      <button
+                        onClick={() => deleteTask(task.id)}
+                        className="w-fit rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
+                      >
+                        Delete
+                      </button>
+                    </li>
+                  ))
+                )}
+              </ul>
+            </div>
+          </section>
+        )}
+
+        {tab === 'archive' && (
+          <section className="rounded-xl border border-emerald-500/20 bg-zinc-950">
+            <div className="border-b border-zinc-800 px-4 py-3 text-sm font-semibold text-emerald-300">
+              Archived (last 14 days)
+            </div>
+            <ul>
+              {loading ? (
+                <li className="px-4 py-3 text-sm text-zinc-400">Loading...</li>
+              ) : archiveTasks.length === 0 ? (
+                <li className="px-4 py-3 text-sm text-zinc-400">No archived tasks.</li>
+              ) : (
+                archiveTasks.map((task) => (
+                  <li key={task.id} className="border-t border-zinc-800 px-4 py-3 text-sm">
+                    <div className="font-medium text-emerald-200">{task.title}</div>
+                    <div className="mt-1 flex flex-wrap gap-2 text-xs">
+                      <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-emerald-300">
+                        {task.category || 'Uncategorized'}
+                      </span>
+                      <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
+                        Priority: {task.priority || 'Medium'}
+                      </span>
+                      <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
+                        Due: {task.due_date}
+                      </span>
+                      <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
+                        Archived: {task.archived_at ? new Date(task.archived_at).toLocaleString() : '—'}
+                      </span>
+                    </div>
+                  </li>
+                ))
+              )}
+            </ul>
+          </section>
+        )}
+
+        <footer className="mt-10 border-t border-zinc-900 pt-4 text-center text-sm text-emerald-500/80">
+          Created by Rich Ruiz
+        </footer>
       </div>
     </main>
   );
-}
-
-function toDateInputValue(d) {
-  const dt = new Date(d);
-  const yyyy = dt.getFullYear();
-  const mm = String(dt.getMonth() + 1).padStart(2, '0');
-  const dd = String(dt.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-function capitalize(s) {
-  if (!s) return '';
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
-function formatDateTime(iso) {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return d.toLocaleString();
-}
-
-function priorityBadgeClasses(priority) {
-  if (priority === 'high') return 'bg-red-900 text-red-200 border border-red-700';
-  if (priority === 'medium') return 'bg-yellow-900 text-yellow-200 border border-yellow-700';
-  return 'bg-sky-900 text-sky-200 border border-sky-700';
 }
