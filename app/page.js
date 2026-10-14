@@ -21,6 +21,12 @@ function addDaysToKey(key, days) {
   return localDateKey(base);
 }
 
+function dueDateKey(value) {
+  if (!value) return '';
+  // Normalizes both "YYYY-MM-DD" and ISO datetime strings
+  return String(value).slice(0, 10);
+}
+
 function quoteForDay(dayKey) {
   const quotes = [
     'Small wins stack into big victories.',
@@ -122,11 +128,14 @@ export default function Page() {
 
   function bucketForDueDate(dueDate) {
     if (!todayKey || !tomorrowKey) return 'today';
-    if (!dueDate) return 'later';
-    if (dueDate === todayKey) return 'today';
-    if (dueDate === tomorrowKey) return 'tomorrow';
-    if (dueDate > tomorrowKey) return 'later';
-    return 'today';
+
+    const key = dueDateKey(dueDate);
+    if (!key) return 'later';
+
+    if (key === todayKey) return 'today';
+    if (key === tomorrowKey) return 'tomorrow';
+    if (key > tomorrowKey) return 'later';
+    return 'today'; // past due stays in today
   }
 
   // Source of truth for completion = completed_at
@@ -169,7 +178,7 @@ export default function Page() {
 
   const todayDueAll = useMemo(() => {
     if (!todayKey) return [];
-    return tasks.filter((t) => t.due_date === todayKey);
+    return tasks.filter((t) => dueDateKey(t.due_date) === todayKey);
   }, [tasks, todayKey]);
 
   const todayDueDone = todayDueAll.filter((t) => !!t.completed_at).length;
@@ -250,7 +259,7 @@ export default function Page() {
     setEditTaskTitle(task.title || '');
     setEditCategory(task.category || 'Personal');
     setEditPriority(task.priority || 'Medium');
-    setEditDueDate(task.due_date || todayKey);
+    setEditDueDate(dueDateKey(task.due_date) || todayKey);
     setEditEntryType((task.entry_type || 'task').toLowerCase());
   }
 
@@ -580,7 +589,7 @@ export default function Page() {
                                   {task.priority || 'Medium'}
                                 </span>
                                 <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
-                                  Due: {task.due_date || '—'}
+                                  Due: {dueDateKey(task.due_date) || '—'}
                                 </span>
                               </div>
                             </div>
@@ -642,7 +651,7 @@ export default function Page() {
                               Priority: {task.priority || 'Medium'}
                             </span>
                             <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
-                              Due: {task.due_date || '—'}
+                              Due: {dueDateKey(task.due_date) || '—'}
                             </span>
                             <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
                               Completed: {task.completed_at ? new Date(task.completed_at).toLocaleString() : '—'}
@@ -689,7 +698,7 @@ export default function Page() {
                         Priority: {task.priority || 'Medium'}
                       </span>
                       <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
-                        Due: {task.due_date || '—'}
+                        Due: {dueDateKey(task.due_date) || '—'}
                       </span>
                       <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
                         Completed: {task.completed_at ? new Date(task.completed_at).toLocaleString() : '—'}
