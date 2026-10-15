@@ -90,9 +90,16 @@ export default function Page() {
   const [newEntryType, setNewEntryType] = useState('task');
 
   const [tasks, setTasks] = useState([]);
+  const [lists, setLists] = useState([]);
+  const [selectedListId, setSelectedListId] = useState(null);
+  const [listItems, setListItems] = useState([]);
+
+  const [newListName, setNewListName] = useState('');
+  const [newListItem, setNewListItem] = useState('');
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [listSaving, setListSaving] = useState(false);
   const [error, setError] = useState(null);
 
   const [editingId, setEditingId] = useState(null);
@@ -105,7 +112,7 @@ export default function Page() {
   const todayKey = currentDay;
   const tomorrowKey = currentDay ? addDaysToKey(currentDay, 1) : '';
 
-  async function loadTasks() {
+  async function fetchTasks() {
     const { data, error } = await supabase
       .from('tasks')
       .select('*')
@@ -113,13 +120,81 @@ export default function Page() {
       .order('created_at', { ascending: true });
 
     if (error) throw error;
-    setTasks(data || []);
+    return data || [];
+  }
+
+  async function fetchLists() {
+    const { data, error } = await supabase
+      .from('one_time_lists')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    return data || [];
+  }
+
+  async function fetchListItems(listId) {
+    if (!listId) return [];
+    const { data, error } = await supabase
+      .from('one_time_list_items')
+      .select('*')
+      .eq('list_id', listId)
+      .order('is_done', { ascending: true })
+      .order('created_at', { ascending: true });
+
+    if (error) throw error;
+    return data || [];
+  }
+
+  async function reloadTasks() {
+    const data = await fetchTasks();
+    setTasks(data);
+  }
+
+  async function reloadLists() {
+    const data = await fetchLists();
+    setLists(data);
+
+    if (data.length === 0) {
+      setSelectedListId(null);
+      setListItems([]);
+      return;
+    }
+
+    const exists = data.some((l) => l.id === selectedListId);
+    const nextSelected = exists ? selectedListId : data[0].id;
+    setSelectedListId(nextSelected);
+
+    const items = await fetchListItems(nextSelected);
+    setListItems(items);
+  }
+
+  async function reloadItems(listId) {
+    if (!listId) {
+      setListItems([]);
+      return;
+    }
+    const items = await fetchListItems(listId);
+    setListItems(items);
   }
 
   async function refreshAll() {
     setError(null);
     try {
-      await loadTasks();
+      const [taskData, listData] = await Promise.all([fetchTasks(), fetchLists()]);
+      setTasks(taskData);
+      setLists(listData);
+
+      if (listData.length === 0) {
+        setSelectedListId(null);
+        setListItems([]);
+      } else {
+        const exists = listData.some((l) => l.id === selectedListId);
+        const nextSelected = exists ? selectedListId : listData[0].id;
+        setSelectedListId(nextSelected);
+        const items = await fetchListItems(nextSelected);
+        setListItems(items);
+      }
     } catch (e) {
       setError(e?.message || 'Failed to load data.');
     } finally {
@@ -145,18 +220,22 @@ export default function Page() {
         setNewDueDate(nowDay);
         refreshAll();
       }
-    }, 60_000);
+    }, 60000);
 
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentDay]);
 
+  useEffect(() => {
+    if (!selectedListId) return;
+    reloadItems(selectedListId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedListId]);
+
   function bucketForDueDate(dueDate) {
     if (!todayKey || !tomorrowKey) return 'today';
-
     const key = dueDateKey(dueDate);
     if (!key) return 'later';
-
     if (key === todayKey) return 'today';
     if (key === tomorrowKey) return 'tomorrow';
     if (key > tomorrowKey) return 'later';
@@ -209,7 +288,7 @@ export default function Page() {
   const todayDueTotal = todayDueAll.length;
   const dueTodayPct = todayDueTotal === 0 ? 0 : Math.round((todayDueDone / todayDueTotal) * 100);
 
-  // Meter 2: Done Today over "today activity" (due today + completed today union)
+  // Meter 2: Done Today over today activity
   const doneTodayCount = completedTodayTasks.length;
   const todayActivityTotal = useMemo(() => {
     const ids = new Set();
@@ -233,6 +312,14 @@ export default function Page() {
     const fromTasks = tasks.map((t) => t.category || 'Uncategorized').filter(Boolean);
     return Array.from(new Set([...base, ...fromTasks]));
   }, [tasks]);
+
+  const selectedList = useMemo(
+    () => lists.find((l) => l.id === selectedListId) || null,
+    [lists, selectedListId]
+  );
+
+  const listDoneCount = listItems.filter((i) => i.is_done).length;
+  const listTotalCount = listItems.length;
 
   async function addTask(e) {
     e.preventDefault();
@@ -258,7 +345,7 @@ export default function Page() {
       setNewPriority('Medium');
       setNewDueDate(todayKey);
       setNewEntryType('task');
-      await loadTasks();
+      await reloadTasks();
     } catch (e) {
       setError(e?.message || 'Failed to add task.');
     } finally {
@@ -272,13 +359,11 @@ export default function Page() {
       const nextCompletedAt = task.completed_at ? null : new Date().toISOString();
       const { error } = await supabase
         .from('tasks')
-        .update({
-          completed_at: nextCompletedAt,
-        })
+        .update({ completed_at: nextCompletedAt })
         .eq('id', task.id);
 
       if (error) throw error;
-      await loadTasks();
+      await reloadTasks();
     } catch (e) {
       setError(e?.message || 'Failed to update task.');
     }
@@ -289,7 +374,7 @@ export default function Page() {
     try {
       const { error } = await supabase.from('tasks').delete().eq('id', taskId);
       if (error) throw error;
-      await loadTasks();
+      await reloadTasks();
     } catch (e) {
       setError(e?.message || 'Failed to delete task.');
     }
@@ -332,9 +417,117 @@ export default function Page() {
 
       if (error) throw error;
       cancelEdit();
-      await loadTasks();
+      await reloadTasks();
     } catch (e) {
       setError(e?.message || 'Failed to save task edits.');
+    }
+  }
+
+  async function createList(e) {
+    e.preventDefault();
+    const name = newListName.trim();
+    if (!name) return;
+
+    setListSaving(true);
+    setError(null);
+    try {
+      const { data, error } = await supabase
+        .from('one_time_lists')
+        .insert({ name })
+        .select('*')
+        .single();
+
+      if (error) throw error;
+
+      setNewListName('');
+      await reloadLists();
+      if (data?.id) {
+        setSelectedListId(data.id);
+        await reloadItems(data.id);
+      }
+    } catch (e) {
+      setError(e?.message || 'Failed to create list.');
+    } finally {
+      setListSaving(false);
+    }
+  }
+
+  async function deleteList(listId) {
+    if (!listId) return;
+    setError(null);
+    try {
+      const { error } = await supabase.from('one_time_lists').delete().eq('id', listId);
+      if (error) throw error;
+      await reloadLists();
+    } catch (e) {
+      setError(e?.message || 'Failed to delete list.');
+    }
+  }
+
+  async function addListItem(e) {
+    e.preventDefault();
+    const title = newListItem.trim();
+    if (!title || !selectedListId) return;
+
+    setListSaving(true);
+    setError(null);
+    try {
+      const { error } = await supabase.from('one_time_list_items').insert({
+        list_id: selectedListId,
+        title,
+        is_done: false,
+      });
+      if (error) throw error;
+
+      setNewListItem('');
+      await reloadItems(selectedListId);
+    } catch (e) {
+      setError(e?.message || 'Failed to add list item.');
+    } finally {
+      setListSaving(false);
+    }
+  }
+
+  async function toggleListItem(item) {
+    setError(null);
+    try {
+      const { error } = await supabase
+        .from('one_time_list_items')
+        .update({ is_done: !item.is_done })
+        .eq('id', item.id);
+
+      if (error) throw error;
+      await reloadItems(selectedListId);
+    } catch (e) {
+      setError(e?.message || 'Failed to update list item.');
+    }
+  }
+
+  async function deleteListItem(itemId) {
+    setError(null);
+    try {
+      const { error } = await supabase.from('one_time_list_items').delete().eq('id', itemId);
+      if (error) throw error;
+      await reloadItems(selectedListId);
+    } catch (e) {
+      setError(e?.message || 'Failed to delete list item.');
+    }
+  }
+
+  async function clearCheckedItems() {
+    if (!selectedListId) return;
+    setError(null);
+    try {
+      const { error } = await supabase
+        .from('one_time_list_items')
+        .delete()
+        .eq('list_id', selectedListId)
+        .eq('is_done', true);
+
+      if (error) throw error;
+      await reloadItems(selectedListId);
+    } catch (e) {
+      setError(e?.message || 'Failed to clear checked items.');
     }
   }
 
@@ -347,7 +540,8 @@ export default function Page() {
   function renderMeter({ tone, label, pct, numerator, denominator }) {
     const radius = 36;
     const circumference = 2 * Math.PI * radius;
-    const dash = circumference * (Math.max(0, Math.min(100, pct)) / 100);
+    const safePct = Math.max(0, Math.min(100, pct));
+    const dash = circumference * (safePct / 100);
 
     return (
       <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
@@ -377,7 +571,7 @@ export default function Page() {
             </svg>
             <div className="absolute inset-0 grid place-items-center text-center">
               <div>
-                <div className={`text-lg font-semibold ${meterValueClass(tone)}`}>{pct}%</div>
+                <div className={`text-lg font-semibold ${meterValueClass(tone)}`}>{safePct}%</div>
                 <div className="text-xs text-zinc-400">
                   {numerator}/{denominator}
                 </div>
@@ -396,7 +590,7 @@ export default function Page() {
 
   return (
     <main className="min-h-screen bg-black text-emerald-100">
-      <div className="mx-auto w-full max-w-5xl px-4 py-8">
+      <div className="mx-auto w-full max-w-7xl px-4 py-8">
         <header className="mb-6 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div>
             <h1 className="text-3xl font-bold tracking-wide text-emerald-300 drop-shadow-sm">
@@ -435,360 +629,517 @@ export default function Page() {
           </div>
         )}
 
-        {tab === 'today' && (
-          <section className="space-y-6">
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-              {renderMeter({
-                tone: 'green',
-                label: 'Due Today Progress',
-                pct: dueTodayPct,
-                numerator: todayDueDone,
-                denominator: todayDueTotal,
-              })}
-              {renderMeter({
-                tone: 'purple',
-                label: 'Done Today Progress',
-                pct: doneTodayPct,
-                numerator: doneTodayCount,
-                denominator: todayActivityTotal,
-              })}
-              {renderMeter({
-                tone: 'red',
-                label: 'Overdue (Not Done)',
-                pct: overduePct,
-                numerator: overdueOpenCount,
-                denominator: openTotal,
-              })}
-            </div>
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+          <div className="space-y-6 lg:col-span-2">
+            {tab === 'today' && (
+              <section className="space-y-6">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                  {renderMeter({
+                    tone: 'green',
+                    label: 'Due Today Progress',
+                    pct: dueTodayPct,
+                    numerator: todayDueDone,
+                    denominator: todayDueTotal,
+                  })}
+                  {renderMeter({
+                    tone: 'purple',
+                    label: 'Done Today Progress',
+                    pct: doneTodayPct,
+                    numerator: doneTodayCount,
+                    denominator: todayActivityTotal,
+                  })}
+                  {renderMeter({
+                    tone: 'red',
+                    label: 'Overdue (Not Done)',
+                    pct: overduePct,
+                    numerator: overdueOpenCount,
+                    denominator: openTotal,
+                  })}
+                </div>
 
-            <form onSubmit={addTask} className="rounded-xl border border-emerald-500/20 bg-zinc-950 p-4">
-              <div className="grid grid-cols-1 gap-2 md:grid-cols-7">
-                <input
-                  value={newTask}
-                  onChange={(e) => setNewTask(e.target.value)}
-                  placeholder="Add a task..."
-                  className="md:col-span-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
-                />
-                <select
-                  value={newEntryType}
-                  onChange={(e) => setNewEntryType(e.target.value)}
-                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                <form
+                  onSubmit={addTask}
+                  className="rounded-xl border border-emerald-500/20 bg-zinc-950 p-4"
                 >
-                  <option value="task">Task</option>
-                  <option value="event">Event</option>
-                  <option value="reminder">Reminder</option>
-                  <option value="appointment">Appointment</option>
-                </select>
-                <select
-                  value={newCategory}
-                  onChange={(e) => setNewCategory(e.target.value)}
-                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
-                >
-                  {allCategories.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  value={newPriority}
-                  onChange={(e) => setNewPriority(e.target.value)}
-                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
-                >
-                  <option>High</option>
-                  <option>Medium</option>
-                  <option>Low</option>
-                </select>
-                <input
-                  type="date"
-                  value={newDueDate}
-                  onChange={(e) => setNewDueDate(e.target.value)}
-                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
-                />
-                <button
-                  type="submit"
-                  disabled={saving || !todayKey}
-                  className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-black hover:bg-emerald-400 disabled:opacity-50"
-                >
-                  Add
-                </button>
-              </div>
-            </form>
+                  <div className="grid grid-cols-1 gap-2 md:grid-cols-7">
+                    <input
+                      value={newTask}
+                      onChange={(e) => setNewTask(e.target.value)}
+                      placeholder="Add a task..."
+                      className="md:col-span-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                    />
+                    <select
+                      value={newEntryType}
+                      onChange={(e) => setNewEntryType(e.target.value)}
+                      className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                    >
+                      <option value="task">Task</option>
+                      <option value="event">Event</option>
+                      <option value="reminder">Reminder</option>
+                      <option value="appointment">Appointment</option>
+                    </select>
+                    <select
+                      value={newCategory}
+                      onChange={(e) => setNewCategory(e.target.value)}
+                      className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                    >
+                      {allCategories.map((c) => (
+                        <option key={c} value={c}>
+                          {c}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={newPriority}
+                      onChange={(e) => setNewPriority(e.target.value)}
+                      className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                    >
+                      <option>High</option>
+                      <option>Medium</option>
+                      <option>Low</option>
+                    </select>
+                    <input
+                      type="date"
+                      value={newDueDate}
+                      onChange={(e) => setNewDueDate(e.target.value)}
+                      className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                    />
+                    <button
+                      type="submit"
+                      disabled={saving || !todayKey}
+                      className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-black hover:bg-emerald-400 disabled:opacity-50"
+                    >
+                      Add
+                    </button>
+                  </div>
+                </form>
 
-            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-              <div className="flex flex-wrap gap-2">
-                {[
-                  { key: 'today', label: 'Due Today' },
-                  { key: 'tomorrow', label: 'Due Tomorrow' },
-                  { key: 'later', label: 'Beyond Tomorrow' },
-                ].map((t) => (
-                  <button
-                    key={t.key}
-                    onClick={() => setDueTab(t.key)}
-                    className={`rounded-md px-3 py-1.5 text-sm transition ${
-                      dueTab === t.key
-                        ? 'bg-emerald-500 text-black'
-                        : 'bg-zinc-900 text-emerald-300 hover:bg-zinc-800'
-                    }`}
-                  >
-                    {t.label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-emerald-400/80">Filter:</span>
-                <select
-                  value={categoryFilter}
-                  onChange={(e) => setCategoryFilter(e.target.value)}
-                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-emerald-100 outline-none focus:border-emerald-500"
-                >
-                  <option value="all">All Categories</option>
-                  {allCategories.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div className="rounded-xl border border-emerald-500/20 bg-zinc-950">
-              <div className="border-b border-zinc-800 px-4 py-3 text-sm font-semibold text-emerald-300">
-                Open Tasks
-              </div>
-              <ul>
-                {loading ? (
-                  <li className="px-4 py-3 text-sm text-zinc-400">Loading...</li>
-                ) : filteredOpenTasks.length === 0 ? (
-                  <li className="px-4 py-3 text-sm text-zinc-400">No tasks in this view.</li>
-                ) : (
-                  filteredOpenTasks.map((task) => {
-                    const overdue = isOverdueTask(task, todayKey);
-                    return (
-                      <li
-                        key={task.id}
-                        className={`border-t px-4 py-3 ${
-                          overdue ? 'border-red-500/40 bg-red-500/5' : 'border-zinc-800'
+                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      { key: 'today', label: 'Due Today' },
+                      { key: 'tomorrow', label: 'Due Tomorrow' },
+                      { key: 'later', label: 'Beyond Tomorrow' },
+                    ].map((t) => (
+                      <button
+                        key={t.key}
+                        onClick={() => setDueTab(t.key)}
+                        className={`rounded-md px-3 py-1.5 text-sm transition ${
+                          dueTab === t.key
+                            ? 'bg-emerald-500 text-black'
+                            : 'bg-zinc-900 text-emerald-300 hover:bg-zinc-800'
                         }`}
                       >
-                        {editingId === task.id ? (
-                          <div className="grid grid-cols-1 gap-2 md:grid-cols-7">
-                            <input
-                              value={editTaskTitle}
-                              onChange={(e) => setEditTaskTitle(e.target.value)}
-                              className="md:col-span-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
-                            />
-                            <select
-                              value={editEntryType}
-                              onChange={(e) => setEditEntryType(e.target.value)}
-                              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
-                            >
-                              <option value="task">Task</option>
-                              <option value="event">Event</option>
-                              <option value="reminder">Reminder</option>
-                              <option value="appointment">Appointment</option>
-                            </select>
-                            <select
-                              value={editCategory}
-                              onChange={(e) => setEditCategory(e.target.value)}
-                              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
-                            >
-                              {allCategories.map((c) => (
-                                <option key={c} value={c}>
-                                  {c}
-                                </option>
-                              ))}
-                            </select>
-                            <select
-                              value={editPriority}
-                              onChange={(e) => setEditPriority(e.target.value)}
-                              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
-                            >
-                              <option>High</option>
-                              <option>Medium</option>
-                              <option>Low</option>
-                            </select>
-                            <input
-                              type="date"
-                              value={editDueDate}
-                              onChange={(e) => setEditDueDate(e.target.value)}
-                              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
-                            />
-                            <div className="flex gap-2">
-                              <button
-                                onClick={() => saveEdit(task.id)}
-                                className="rounded-md bg-emerald-500 px-3 py-2 text-xs font-semibold text-black hover:bg-emerald-400"
-                              >
-                                Save
-                              </button>
-                              <button
-                                onClick={cancelEdit}
-                                className="rounded-md bg-zinc-800 px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-700"
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                            <div className="flex items-start gap-3">
-                              <input
-                                type="checkbox"
-                                checked={false}
-                                onChange={() => toggleDone(task)}
-                                className="mt-1 h-4 w-4"
-                              />
-                              <div>
-                                <div className="text-base text-emerald-100">{task.title}</div>
-                                <div className="mt-1 flex flex-wrap gap-2 text-xs">
-                                  <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 text-cyan-300">
-                                    {titleCaseEntryType(task.entry_type)}
-                                  </span>
-                                  <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-emerald-300">
-                                    {task.category || 'Uncategorized'}
-                                  </span>
-                                  <span
-                                    className={`rounded border px-2 py-0.5 ${priorityClasses(
-                                      task.priority || 'Medium'
-                                    )}`}
+                        {t.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-emerald-400/80">Filter:</span>
+                    <select
+                      value={categoryFilter}
+                      onChange={(e) => setCategoryFilter(e.target.value)}
+                      className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                    >
+                      <option value="all">All Categories</option>
+                      {allCategories.map((c) => (
+                        <option key={c} value={c}>
+                          {c}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-emerald-500/20 bg-zinc-950">
+                  <div className="border-b border-zinc-800 px-4 py-3 text-sm font-semibold text-emerald-300">
+                    Open Tasks
+                  </div>
+                  <ul>
+                    {loading ? (
+                      <li className="px-4 py-3 text-sm text-zinc-400">Loading...</li>
+                    ) : filteredOpenTasks.length === 0 ? (
+                      <li className="px-4 py-3 text-sm text-zinc-400">No tasks in this view.</li>
+                    ) : (
+                      filteredOpenTasks.map((task) => {
+                        const overdue = isOverdueTask(task, todayKey);
+                        return (
+                          <li
+                            key={task.id}
+                            className={`border-t px-4 py-3 ${
+                              overdue ? 'border-red-500/40 bg-red-500/5' : 'border-zinc-800'
+                            }`}
+                          >
+                            {editingId === task.id ? (
+                              <div className="grid grid-cols-1 gap-2 md:grid-cols-7">
+                                <input
+                                  value={editTaskTitle}
+                                  onChange={(e) => setEditTaskTitle(e.target.value)}
+                                  className="md:col-span-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                                />
+                                <select
+                                  value={editEntryType}
+                                  onChange={(e) => setEditEntryType(e.target.value)}
+                                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                                >
+                                  <option value="task">Task</option>
+                                  <option value="event">Event</option>
+                                  <option value="reminder">Reminder</option>
+                                  <option value="appointment">Appointment</option>
+                                </select>
+                                <select
+                                  value={editCategory}
+                                  onChange={(e) => setEditCategory(e.target.value)}
+                                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                                >
+                                  {allCategories.map((c) => (
+                                    <option key={c} value={c}>
+                                      {c}
+                                    </option>
+                                  ))}
+                                </select>
+                                <select
+                                  value={editPriority}
+                                  onChange={(e) => setEditPriority(e.target.value)}
+                                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                                >
+                                  <option>High</option>
+                                  <option>Medium</option>
+                                  <option>Low</option>
+                                </select>
+                                <input
+                                  type="date"
+                                  value={editDueDate}
+                                  onChange={(e) => setEditDueDate(e.target.value)}
+                                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                                />
+                                <div className="flex gap-2">
+                                  <button
+                                    onClick={() => saveEdit(task.id)}
+                                    className="rounded-md bg-emerald-500 px-3 py-2 text-xs font-semibold text-black hover:bg-emerald-400"
                                   >
-                                    {task.priority || 'Medium'}
-                                  </span>
-                                  <span
-                                    className={`rounded border px-2 py-0.5 ${
-                                      overdue
-                                        ? 'border-red-400/40 bg-red-500/20 text-red-200'
-                                        : 'border-zinc-700 bg-zinc-900 text-zinc-300'
-                                    }`}
+                                    Save
+                                  </button>
+                                  <button
+                                    onClick={cancelEdit}
+                                    className="rounded-md bg-zinc-800 px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-700"
                                   >
-                                    Due: {dueDateKey(task.due_date) || '—'}
-                                  </span>
-                                  {overdue && (
-                                    <span className="rounded border border-red-400/50 bg-red-600/30 px-2 py-0.5 text-red-100">
-                                      Overdue
-                                    </span>
-                                  )}
+                                    Cancel
+                                  </button>
                                 </div>
                               </div>
+                            ) : (
+                              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                                <div className="flex items-start gap-3">
+                                  <input
+                                    type="checkbox"
+                                    checked={false}
+                                    onChange={() => toggleDone(task)}
+                                    className="mt-1 h-4 w-4"
+                                  />
+                                  <div>
+                                    <div className="text-base text-emerald-100">{task.title}</div>
+                                    <div className="mt-1 flex flex-wrap gap-2 text-xs">
+                                      <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 text-cyan-300">
+                                        {titleCaseEntryType(task.entry_type)}
+                                      </span>
+                                      <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-emerald-300">
+                                        {task.category || 'Uncategorized'}
+                                      </span>
+                                      <span
+                                        className={`rounded border px-2 py-0.5 ${priorityClasses(
+                                          task.priority || 'Medium'
+                                        )}`}
+                                      >
+                                        {task.priority || 'Medium'}
+                                      </span>
+                                      <span
+                                        className={`rounded border px-2 py-0.5 ${
+                                          overdue
+                                            ? 'border-red-400/40 bg-red-500/20 text-red-200'
+                                            : 'border-zinc-700 bg-zinc-900 text-zinc-300'
+                                        }`}
+                                      >
+                                        Due: {dueDateKey(task.due_date) || '—'}
+                                      </span>
+                                      {overdue && (
+                                        <span className="rounded border border-red-400/50 bg-red-600/30 px-2 py-0.5 text-red-100">
+                                          Overdue
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                                <div className="flex gap-2">
+                                  <button
+                                    onClick={() => startEdit(task)}
+                                    className="rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
+                                  >
+                                    Edit
+                                  </button>
+                                  <button
+                                    onClick={() => deleteTask(task.id)}
+                                    className="rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </li>
+                        );
+                      })
+                    )}
+                  </ul>
+                </div>
+
+                <div className="rounded-xl border border-purple-500/30 bg-purple-950/20">
+                  <div className="border-b border-purple-500/20 px-4 py-3 text-sm font-semibold text-purple-300">
+                    Completed Today
+                  </div>
+                  <ul>
+                    {loading ? (
+                      <li className="px-4 py-3 text-sm text-zinc-400">Loading...</li>
+                    ) : completedTodayTasks.length === 0 ? (
+                      <li className="px-4 py-3 text-sm text-zinc-400">No completed tasks yet.</li>
+                    ) : (
+                      completedTodayTasks.map((task) => (
+                        <li
+                          key={task.id}
+                          className="flex flex-col gap-3 border-t border-purple-500/20 px-4 py-3 md:flex-row md:items-center md:justify-between"
+                        >
+                          <label className="flex items-start gap-3">
+                            <input
+                              type="checkbox"
+                              checked
+                              onChange={() => toggleDone(task)}
+                              className="mt-1 h-4 w-4"
+                            />
+                            <div>
+                              <div className="text-purple-200 line-through">{task.title}</div>
+                              <div className="mt-1 flex flex-wrap gap-2 text-xs">
+                                <span className="rounded border border-cyan-400/30 bg-cyan-500/10 px-2 py-0.5 text-cyan-300">
+                                  {titleCaseEntryType(task.entry_type)}
+                                </span>
+                                <span className="rounded border border-purple-400/40 bg-purple-500/10 px-2 py-0.5 text-purple-300">
+                                  {task.category || 'Uncategorized'}
+                                </span>
+                                <span
+                                  className={`rounded border px-2 py-0.5 ${priorityClasses(
+                                    task.priority || 'Medium'
+                                  )}`}
+                                >
+                                  {task.priority || 'Medium'}
+                                </span>
+                                <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
+                                  Due: {dueDateKey(task.due_date) || '—'}
+                                </span>
+                                <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
+                                  Completed:{' '}
+                                  {task.completed_at
+                                    ? new Date(task.completed_at).toLocaleString()
+                                    : '—'}
+                                </span>
+                              </div>
                             </div>
-                            <div className="flex gap-2">
+                          </label>
+                          <button
+                            onClick={() => deleteTask(task.id)}
+                            className="w-fit rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
+                          >
+                            Delete
+                          </button>
+                        </li>
+                      ))
+                    )}
+                  </ul>
+                </div>
+              </section>
+            )}
+
+            {tab === 'archive' && (
+              <section className="rounded-xl border border-emerald-500/20 bg-zinc-950">
+                <div className="border-b border-zinc-800 px-4 py-3 text-sm font-semibold text-emerald-300">
+                  Archived (last 14 days)
+                </div>
+                <ul>
+                  {loading ? (
+                    <li className="px-4 py-3 text-sm text-zinc-400">Loading...</li>
+                  ) : archiveTasks.length === 0 ? (
+                    <li className="px-4 py-3 text-sm text-zinc-400">No archived tasks.</li>
+                  ) : (
+                    archiveTasks.map((task) => (
+                      <li key={task.id} className="border-t border-zinc-800 px-4 py-3 text-sm">
+                        <div className="font-medium text-emerald-200 line-through">{task.title}</div>
+                        <div className="mt-1 flex flex-wrap gap-2 text-xs">
+                          <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 text-cyan-300">
+                            {titleCaseEntryType(task.entry_type)}
+                          </span>
+                          <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-emerald-300">
+                            {task.category || 'Uncategorized'}
+                          </span>
+                          <span
+                            className={`rounded border px-2 py-0.5 ${priorityClasses(
+                              task.priority || 'Medium'
+                            )}`}
+                          >
+                            {task.priority || 'Medium'}
+                          </span>
+                          <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
+                            Due: {dueDateKey(task.due_date) || '—'}
+                          </span>
+                          <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
+                            Completed:{' '}
+                            {task.completed_at ? new Date(task.completed_at).toLocaleString() : '—'}
+                          </span>
+                        </div>
+                      </li>
+                    ))
+                  )}
+                </ul>
+              </section>
+            )}
+          </div>
+
+          <aside className="lg:col-span-1">
+            <div className="rounded-xl border border-cyan-500/20 bg-zinc-950">
+              <div className="border-b border-zinc-800 px-4 py-3">
+                <h2 className="text-sm font-semibold text-cyan-300">One-Time Lists</h2>
+                <p className="mt-1 text-xs text-zinc-400">
+                  Grocery trips, freelance job checklists, and other temporary lists.
+                </p>
+              </div>
+
+              <div className="p-4 space-y-4">
+                <form onSubmit={createList} className="flex gap-2">
+                  <input
+                    value={newListName}
+                    onChange={(e) => setNewListName(e.target.value)}
+                    placeholder="New list name..."
+                    className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-cyan-100 outline-none focus:border-cyan-500"
+                  />
+                  <button
+                    type="submit"
+                    disabled={listSaving}
+                    className="rounded-md bg-cyan-500 px-3 py-2 text-sm font-semibold text-black hover:bg-cyan-400 disabled:opacity-50"
+                  >
+                    Add
+                  </button>
+                </form>
+
+                <div className="max-h-56 overflow-auto rounded-md border border-zinc-800">
+                  {lists.length === 0 ? (
+                    <div className="px-3 py-3 text-xs text-zinc-400">No lists yet.</div>
+                  ) : (
+                    <ul>
+                      {lists.map((list) => (
+                        <li key={list.id} className="border-t border-zinc-800 first:border-t-0">
+                          <button
+                            onClick={() => setSelectedListId(list.id)}
+                            className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm ${
+                              selectedListId === list.id
+                                ? 'bg-cyan-500/20 text-cyan-200'
+                                : 'text-zinc-200 hover:bg-zinc-900'
+                            }`}
+                          >
+                            <span className="truncate">{list.name}</span>
+                            {selectedListId === list.id && (
+                              <span className="text-xs text-cyan-300">Active</span>
+                            )}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
+                {selectedList ? (
+                  <div className="space-y-3 rounded-md border border-cyan-500/20 bg-cyan-950/10 p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="text-sm font-semibold text-cyan-200">{selectedList.name}</div>
+                        <div className="text-xs text-zinc-400">
+                          {listDoneCount}/{listTotalCount} checked
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => deleteList(selectedList.id)}
+                        className="rounded bg-red-600/80 px-2 py-1 text-xs text-red-100 hover:bg-red-500"
+                      >
+                        Delete List
+                      </button>
+                    </div>
+
+                    <form onSubmit={addListItem} className="flex gap-2">
+                      <input
+                        value={newListItem}
+                        onChange={(e) => setNewListItem(e.target.value)}
+                        placeholder="Add item..."
+                        className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-cyan-100 outline-none focus:border-cyan-500"
+                      />
+                      <button
+                        type="submit"
+                        disabled={listSaving}
+                        className="rounded-md bg-cyan-500 px-3 py-2 text-sm font-semibold text-black hover:bg-cyan-400 disabled:opacity-50"
+                      >
+                        Add
+                      </button>
+                    </form>
+
+                    <div className="max-h-72 overflow-auto rounded-md border border-zinc-800">
+                      {listItems.length === 0 ? (
+                        <div className="px-3 py-3 text-xs text-zinc-400">No items yet.</div>
+                      ) : (
+                        <ul>
+                          {listItems.map((item) => (
+                            <li
+                              key={item.id}
+                              className="flex items-center justify-between gap-2 border-t border-zinc-800 px-3 py-2 first:border-t-0"
+                            >
+                              <label className="flex min-w-0 items-center gap-2">
+                                <input
+                                  type="checkbox"
+                                  checked={item.is_done}
+                                  onChange={() => toggleListItem(item)}
+                                  className="h-4 w-4"
+                                />
+                                <span
+                                  className={`truncate text-sm ${
+                                    item.is_done ? 'text-zinc-400 line-through' : 'text-zinc-100'
+                                  }`}
+                                >
+                                  {item.title}
+                                </span>
+                              </label>
                               <button
-                                onClick={() => startEdit(task)}
-                                className="rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
-                              >
-                                Edit
-                              </button>
-                              <button
-                                onClick={() => deleteTask(task.id)}
+                                onClick={() => deleteListItem(item.id)}
                                 className="rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
                               >
                                 Delete
                               </button>
-                            </div>
-                          </div>
-                        )}
-                      </li>
-                    );
-                  })
-                )}
-              </ul>
-            </div>
-
-            <div className="rounded-xl border border-purple-500/30 bg-purple-950/20">
-              <div className="border-b border-purple-500/20 px-4 py-3 text-sm font-semibold text-purple-300">
-                Completed Today
-              </div>
-              <ul>
-                {loading ? (
-                  <li className="px-4 py-3 text-sm text-zinc-400">Loading...</li>
-                ) : completedTodayTasks.length === 0 ? (
-                  <li className="px-4 py-3 text-sm text-zinc-400">No completed tasks yet.</li>
-                ) : (
-                  completedTodayTasks.map((task) => (
-                    <li
-                      key={task.id}
-                      className="flex flex-col gap-3 border-t border-purple-500/20 px-4 py-3 md:flex-row md:items-center md:justify-between"
-                    >
-                      <label className="flex items-start gap-3">
-                        <input
-                          type="checkbox"
-                          checked
-                          onChange={() => toggleDone(task)}
-                          className="mt-1 h-4 w-4"
-                        />
-                        <div>
-                          <div className="text-purple-200 line-through">{task.title}</div>
-                          <div className="mt-1 flex flex-wrap gap-2 text-xs">
-                            <span className="rounded border border-cyan-400/30 bg-cyan-500/10 px-2 py-0.5 text-cyan-300">
-                              {titleCaseEntryType(task.entry_type)}
-                            </span>
-                            <span className="rounded border border-purple-400/40 bg-purple-500/10 px-2 py-0.5 text-purple-300">
-                              {task.category || 'Uncategorized'}
-                            </span>
-                            <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
-                              Priority: {task.priority || 'Medium'}
-                            </span>
-                            <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
-                              Due: {dueDateKey(task.due_date) || '—'}
-                            </span>
-                            <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
-                              Completed: {task.completed_at ? new Date(task.completed_at).toLocaleString() : '—'}
-                            </span>
-                          </div>
-                        </div>
-                      </label>
-                      <button
-                        onClick={() => deleteTask(task.id)}
-                        className="w-fit rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
-                      >
-                        Delete
-                      </button>
-                    </li>
-                  ))
-                )}
-              </ul>
-            </div>
-          </section>
-        )}
-
-        {tab === 'archive' && (
-          <section className="rounded-xl border border-emerald-500/20 bg-zinc-950">
-            <div className="border-b border-zinc-800 px-4 py-3 text-sm font-semibold text-emerald-300">
-              Archived (last 14 days)
-            </div>
-            <ul>
-              {loading ? (
-                <li className="px-4 py-3 text-sm text-zinc-400">Loading...</li>
-              ) : archiveTasks.length === 0 ? (
-                <li className="px-4 py-3 text-sm text-zinc-400">No archived tasks.</li>
-              ) : (
-                archiveTasks.map((task) => (
-                  <li key={task.id} className="border-t border-zinc-800 px-4 py-3 text-sm">
-                    <div className="font-medium text-emerald-200 line-through">{task.title}</div>
-                    <div className="mt-1 flex flex-wrap gap-2 text-xs">
-                      <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 text-cyan-300">
-                        {titleCaseEntryType(task.entry_type)}
-                      </span>
-                      <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-emerald-300">
-                        {task.category || 'Uncategorized'}
-                      </span>
-                      <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
-                        Priority: {task.priority || 'Medium'}
-                      </span>
-                      <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
-                        Due: {dueDateKey(task.due_date) || '—'}
-                      </span>
-                      <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
-                        Completed: {task.completed_at ? new Date(task.completed_at).toLocaleString() : '—'}
-                      </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                     </div>
-                  </li>
-                ))
-              )}
-            </ul>
-          </section>
-        )}
+
+                    <button
+                      onClick={clearCheckedItems}
+                      className="rounded bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-700"
+                    >
+                      Delete Checked Items
+                    </button>
+                  </div>
+                ) : (
+                  <div className="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-3 text-xs text-zinc-400">
+                    Create or select a list to start checking things off.
+                  </div>
+                )}
+              </div>
+            </div>
+          </aside>
+        </div>
 
         <footer className="mt-10 border-t border-zinc-900 pt-4 text-center text-sm text-emerald-500/80">
           Created by Rich Ruiz
