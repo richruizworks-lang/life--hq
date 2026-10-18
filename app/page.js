@@ -2,38 +2,66 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 
+const CATEGORIES = [
+  'Personal',
+  'Personal Growth',
+  'Home',
+  'Work / Production',
+  'Drone / Gear',
+  'Broadcast',
+  'Family',
+  'Finance',
+];
+
 function LifeHQPage() {
   const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
   const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+  const hasSupabaseConfig = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
 
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('today'); // today | tomorrow | beyond
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
+  // Navigation & Filtering State
+  const [viewMode, setViewMode] = useState('today'); // 'today' | 'archive'
+  const [activeTab, setActiveTab] = useState('today'); // 'today' | 'tomorrow' | 'beyond'
+  const [categoryFilter, setCategoryFilter] = useState('All Categories');
+
+  // Date Strings
+  const [todayStr, setTodayStr] = useState('');
+  const [tomorrowStr, setTomorrowStr] = useState('');
+
+  // Add Task Form State
   const [form, setForm] = useState({
     title: '',
-    category: '',
+    category: 'Personal',
     priority: 'medium',
     due_date: '',
     entry_type: 'task',
   });
 
+  // Inline Edit Form State
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({
     title: '',
-    category: '',
+    category: 'Personal',
     priority: 'medium',
     due_date: '',
     entry_type: 'task',
   });
 
-  const hasSupabaseConfig = SUPABASE_URL && SUPABASE_ANON_KEY;
+  // Initialize Local Dates Once on Mount
+  useEffect(() => {
+    const now = new Date();
+    const tStr = toDateInputValue(now);
+    const tmStr = toDateInputValue(addDays(now, 1));
+    setTodayStr(tStr);
+    setTomorrowStr(tmStr);
+    setForm((f) => ({ ...f, due_date: tStr }));
+  }, []);
 
-  const [todayStr, setTodayStr] = useState("");
-  const [tomorrowStr, setTomorrowStr] = useState("");
-
+  // Load Tasks from Supabase
   useEffect(() => {
     loadItems();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -73,11 +101,15 @@ function LifeHQPage() {
       setLoading(true);
       setError('');
 
-      // Keep overdue status in sync each day
-      await supabaseRequest('/rest/v1/rpc/normalize_overdue', {
-        method: 'POST',
-        body: JSON.stringify({}),
-      });
+      // Sync overdue status via RPC if available
+      try {
+        await supabaseRequest('/rest/v1/rpc/normalize_overdue', {
+          method: 'POST',
+          body: JSON.stringify({}),
+        });
+      } catch {
+        // Ignore if RPC doesn't exist yet; client-side deriveStatus handles it
+      }
 
       const data = await supabaseRequest(
         '/rest/v1/tasks?select=id,title,category,priority,due_date,entry_type,status,created_at,completed_at&order=due_date.asc.nullslast,created_at.desc'
@@ -92,8 +124,8 @@ function LifeHQPage() {
   }
 
   function deriveStatus(item) {
-    if (item.completed_at) return 'completed';
-    if (item.due_date && item.due_date < todayStr) return 'overdue';
+    if (item.completed_at || item.status === 'completed') return 'completed';
+    if (todayStr && item.due_date && item.due_date < todayStr) return 'overdue';
     return 'open';
   }
 
@@ -106,22 +138,51 @@ function LifeHQPage() {
     [items, todayStr]
   );
 
+  // Dynamic list of all categories present in DB + defaults
+  const availableCategories = useMemo(() => {
+    const set = new Set(CATEGORIES);
+    normalizedItems.forEach((i) => {
+      if (i.category) set.add(i.category);
+    });
+    return Array.from(set);
+  }, [normalizedItems]);
+
+  // Filtered Open Buckets
+  const matchesCategory = (item) =>
+    categoryFilter === 'All Categories' || item.category === categoryFilter;
+
   const dueTodayItems = normalizedItems.filter((i) => {
-    if (i.status === 'completed') return false;
-    return i.due_date === todayStr || i.status === 'overdue';
+    if (i.status === 'completed' || !matchesCategory(i)) return false;
+    return !i.due_date || i.due_date === todayStr || i.status === 'overdue';
   });
 
   const dueTomorrowItems = normalizedItems.filter(
-    (i) => i.status !== 'completed' && i.due_date === tomorrowStr
+    (i) => i.status !== 'completed' && matchesCategory(i) && i.due_date === tomorrowStr
   );
 
   const beyondTomorrowItems = normalizedItems.filter((i) => {
-    if (i.status === 'completed') return false;
-    if (!i.due_date) return false;
-    return i.due_date > tomorrowStr;
+    if (i.status === 'completed' || !matchesCategory(i)) return false;
+    return i.due_date && i.due_date > tomorrowStr;
   });
 
-  const completedItems = normalizedItems.filter((i) => i.status === 'completed');
+  // Completed Today vs 14-Day Archive
+  const completedTodayItems = normalizedItems.filter((i) => {
+    if (i.status !== 'completed' || !matchesCategory(i)) return false;
+    if (!i.completed_at) return true;
+    return toDateInputValue(i.completed_at) === todayStr;
+  });
+
+  const archive14dItems = useMemo(() => {
+    if (!todayStr) return [];
+    const cutoff = toDateInputValue(addDays(new Date(), -14));
+    return normalizedItems
+      .filter((i) => {
+        if (i.status !== 'completed' || !matchesCategory(i)) return false;
+        if (!i.completed_at) return true;
+        return toDateInputValue(i.completed_at) >= cutoff;
+      })
+      .sort((a, b) => (a.completed_at < b.completed_at ? 1 : -1));
+  }, [normalizedItems, todayStr, categoryFilter]);
 
   const visibleItems =
     activeTab === 'today'
@@ -130,11 +191,11 @@ function LifeHQPage() {
       ? dueTomorrowItems
       : beyondTomorrowItems;
 
-  const todayAll = normalizedItems.filter(
-    (i) => i.due_date === todayStr || (i.status === 'overdue' && !i.completed_at)
-  );
-  const todayCompleted = todayAll.filter((i) => i.status === 'completed').length;
-  const progress = todayAll.length ? Math.round((todayCompleted / todayAll.length) * 100) : 0;
+  // Daily Progress Calculation
+  const todayTotalCount = dueTodayItems.length + completedTodayItems.length;
+  const todayDoneCount = completedTodayItems.length;
+  const todayLeftCount = dueTodayItems.length;
+  const progress = todayTotalCount ? Math.round((todayDoneCount / todayTotalCount) * 100) : 0;
 
   async function addItem(e) {
     e.preventDefault();
@@ -149,23 +210,20 @@ function LifeHQPage() {
         body: JSON.stringify([
           {
             title: form.title.trim(),
-            category: form.category.trim() || null,
+            category: form.category || 'Personal',
             priority: form.priority,
-            due_date: form.due_date || null,
-            entry_type: form.entry_type,
+            due_date: form.due_date || todayStr || null,
+            entry_type: form.entry_type || 'task',
             completed_at: null,
             status: 'open',
           },
         ]),
       });
 
-      setForm({
+      setForm((f) => ({
+        ...f,
         title: '',
-        category: '',
-        priority: 'medium',
-        due_date: '',
-        entry_type: 'task',
-      });
+      }));
 
       await loadItems();
     } catch (e2) {
@@ -179,7 +237,7 @@ function LifeHQPage() {
     setEditingId(item.id);
     setEditForm({
       title: item.title || '',
-      category: item.category || '',
+      category: item.category || 'Personal',
       priority: item.priority || 'medium',
       due_date: item.due_date || '',
       entry_type: item.entry_type || 'task',
@@ -195,7 +253,7 @@ function LifeHQPage() {
         method: 'PATCH',
         body: JSON.stringify({
           title: editForm.title.trim(),
-          category: editForm.category.trim() || null,
+          category: editForm.category || null,
           priority: editForm.priority,
           due_date: editForm.due_date || null,
           entry_type: editForm.entry_type,
@@ -211,43 +269,23 @@ function LifeHQPage() {
     }
   }
 
-  async function markCompleted(item) {
+  async function toggleCompleted(item) {
     try {
       setSaving(true);
       setError('');
 
+      const isCompleting = item.status !== 'completed';
       await supabaseRequest(`/rest/v1/tasks?id=eq.${item.id}`, {
         method: 'PATCH',
         body: JSON.stringify({
-          completed_at: new Date().toISOString(),
-          status: 'completed',
+          completed_at: isCompleting ? new Date().toISOString() : null,
+          status: isCompleting ? 'completed' : 'open',
         }),
       });
 
       await loadItems();
     } catch (e) {
-      setError(e.message || 'Failed to mark completed');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function reopenItem(item) {
-    try {
-      setSaving(true);
-      setError('');
-
-      await supabaseRequest(`/rest/v1/tasks?id=eq.${item.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          completed_at: null,
-          status: 'open',
-        }),
-      });
-
-      await loadItems();
-    } catch (e) {
-      setError(e.message || 'Failed to reopen item');
+      setError(e.message || 'Failed to update task status');
     } finally {
       setSaving(false);
     }
@@ -270,336 +308,435 @@ function LifeHQPage() {
       setSaving(false);
     }
   }
-  useEffect(() => {
-    const now = new Date();
-    setTodayStr(toDateInputValue(now));
-    setTomorrowStr(toDateInputValue(addDays(now, 1)));
-  }, []);
-
 
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6 lg:px-8">
-        <header className="mb-6">
-          <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">Rich&apos;s Life HQ</h1>
-          <p className="mt-2 text-slate-300">
-            “Small daily discipline compounds into a life you’re proud of.”
-          </p>
+    <main className="min-h-screen bg-black text-zinc-100">
+      <div className="mx-auto w-full max-w-4xl px-4 py-8 sm:px-6">
+        {/* Header */}
+        <header className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight text-emerald-400">
+              Rich&apos;s Life HQ
+            </h1>
+            <p className="mt-1 text-sm italic text-emerald-500/80">
+              &ldquo;Focus on progress, not perfection.&rdquo;
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setViewMode('today')}
+              className={`rounded-md px-3.5 py-1.5 text-sm font-semibold transition ${
+                viewMode === 'today'
+                  ? 'bg-emerald-500 text-black'
+                  : 'border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800'
+              }`}
+            >
+              Today
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('archive')}
+              className={`rounded-md px-3.5 py-1.5 text-sm font-semibold transition ${
+                viewMode === 'archive'
+                  ? 'bg-emerald-500 text-black'
+                  : 'border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800'
+              }`}
+            >
+              Archive (14d)
+            </button>
+          </div>
         </header>
 
-        <section className="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
-          <div className="rounded-xl border border-slate-800 bg-slate-900 p-4 lg:col-span-2">
-            <h2 className="mb-3 text-lg font-semibold">Add Entry</h2>
-            <form onSubmit={addItem} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <input
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 outline-none ring-purple-500 focus:ring"
-                placeholder="Title"
-                value={form.title}
-                onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
-                required
-              />
-              <input
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 outline-none ring-purple-500 focus:ring"
-                placeholder="Category"
-                value={form.category}
-                onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}
-              />
-              <select
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 outline-none ring-purple-500 focus:ring"
-                value={form.entry_type}
-                onChange={(e) => setForm((f) => ({ ...f, entry_type: e.target.value }))}
-              >
-                <option value="task">Task</option>
-                <option value="event">Event</option>
-                <option value="reminder">Reminder</option>
-                <option value="appointment">Appointment</option>
-              </select>
-              <select
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 outline-none ring-purple-500 focus:ring"
-                value={form.priority}
-                onChange={(e) => setForm((f) => ({ ...f, priority: e.target.value }))}
-              >
-                <option value="low">Priority: Low</option>
-                <option value="medium">Priority: Medium</option>
-                <option value="high">Priority: High</option>
-              </select>
-              <input
-                type="date"
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 outline-none ring-purple-500 focus:ring sm:col-span-1"
-                value={form.due_date}
-                onChange={(e) => setForm((f) => ({ ...f, due_date: e.target.value }))}
-              />
-              <button
-                disabled={saving}
-                className="rounded-lg bg-purple-600 px-4 py-2 font-medium text-white transition hover:bg-purple-500 disabled:opacity-50"
-                type="submit"
-              >
-                {saving ? 'Saving...' : 'Add'}
-              </button>
-            </form>
-          </div>
-
-          <div className="rounded-xl border border-slate-800 bg-slate-900 p-4">
-            <h2 className="mb-2 text-lg font-semibold">Today Progress</h2>
-            <div className="flex items-center gap-4">
-              <ProgressRing percent={progress} />
-              <div>
-                <p className="text-2xl font-bold">{progress}%</p>
-                <p className="text-sm text-slate-300">
-                  {todayCompleted}/{todayAll.length} completed
-                </p>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section className="mb-6 rounded-xl border border-slate-800 bg-slate-900 p-4">
-          <div className="mb-4 flex flex-wrap gap-2">
-            <TabButton
-              active={activeTab === 'today'}
-              onClick={() => setActiveTab('today')}
-              label="Due Today"
-              count={dueTodayItems.length}
-            />
-            <TabButton
-              active={activeTab === 'tomorrow'}
-              onClick={() => setActiveTab('tomorrow')}
-              label="Due Tomorrow"
-              count={dueTomorrowItems.length}
-            />
-            <TabButton
-              active={activeTab === 'beyond'}
-              onClick={() => setActiveTab('beyond')}
-              label="Beyond Tomorrow"
-              count={beyondTomorrowItems.length}
-            />
-          </div>
-
-          {loading ? (
-            <p className="text-slate-300">Loading...</p>
-          ) : visibleItems.length === 0 ? (
-            <p className="text-slate-300">No entries in this view.</p>
-          ) : (
-            <div className="space-y-3">
-              {visibleItems.map((item) => {
-                const isOverdue = item.status === 'overdue';
-                const cardClass = isOverdue
-                  ? 'border-red-700 bg-red-950/30'
-                  : 'border-slate-800 bg-slate-950';
-  useEffect(() => {
-    const now = new Date();
-    setTodayStr(toDateInputValue(now));
-    setTomorrowStr(toDateInputValue(addDays(now, 1)));
-  }, []);
-
-
-                return (
-                  <div key={item.id} className={`rounded-lg border p-3 ${cardClass}`}>
-                    {editingId === item.id ? (
-                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                        <input
-                          className="rounded border border-slate-700 bg-slate-900 px-3 py-2"
-                          value={editForm.title}
-                          onChange={(e) => setEditForm((f) => ({ ...f, title: e.target.value }))}
-                        />
-                        <input
-                          className="rounded border border-slate-700 bg-slate-900 px-3 py-2"
-                          value={editForm.category}
-                          onChange={(e) => setEditForm((f) => ({ ...f, category: e.target.value }))}
-                          placeholder="Category"
-                        />
-                        <select
-                          className="rounded border border-slate-700 bg-slate-900 px-3 py-2"
-                          value={editForm.entry_type}
-                          onChange={(e) => setEditForm((f) => ({ ...f, entry_type: e.target.value }))}
-                        >
-                          <option value="task">Task</option>
-                          <option value="event">Event</option>
-                          <option value="reminder">Reminder</option>
-                          <option value="appointment">Appointment</option>
-                        </select>
-                        <select
-                          className="rounded border border-slate-700 bg-slate-900 px-3 py-2"
-                          value={editForm.priority}
-                          onChange={(e) => setEditForm((f) => ({ ...f, priority: e.target.value }))}
-                        >
-                          <option value="low">Low</option>
-                          <option value="medium">Medium</option>
-                          <option value="high">High</option>
-                        </select>
-                        <input
-                          type="date"
-                          className="rounded border border-slate-700 bg-slate-900 px-3 py-2"
-                          value={editForm.due_date || ''}
-                          onChange={(e) => setEditForm((f) => ({ ...f, due_date: e.target.value }))}
-                        />
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => saveEdit(item.id)}
-                            className="rounded bg-emerald-600 px-3 py-2 text-sm font-medium hover:bg-emerald-500"
-                          >
-                            Save
-                          </button>
-                          <button
-                            onClick={() => setEditingId(null)}
-                            className="rounded bg-slate-700 px-3 py-2 text-sm font-medium hover:bg-slate-600"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                        <div>
-                          <p className="font-semibold">{item.title}</p>
-                          <p className="text-sm text-slate-300">
-                            {capitalize(item.entry_type)} • {item.category || 'No category'} •{' '}
-                            {capitalize(item.priority)} priority • Due: {item.due_date || 'No date'}
-                          </p>
-                          <StatusBadge status={item.status} />
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          {item.status !== 'completed' ? (
-                            <button
-                              onClick={() => markCompleted(item)}
-                              className="rounded bg-emerald-600 px-3 py-2 text-sm font-medium hover:bg-emerald-500"
-                            >
-                              Complete
-                            </button>
-                          ) : (
-                            <button
-                              onClick={() => reopenItem(item)}
-                              className="rounded bg-amber-600 px-3 py-2 text-sm font-medium hover:bg-amber-500"
-                            >
-                              Reopen
-                            </button>
-                          )}
-                          <button
-                            onClick={() => startEdit(item)}
-                            className="rounded bg-blue-600 px-3 py-2 text-sm font-medium hover:bg-blue-500"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => deleteItem(item.id)}
-                            className="rounded bg-rose-700 px-3 py-2 text-sm font-medium hover:bg-rose-600"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
-
-        <section className="mb-6 rounded-xl border border-purple-800 bg-purple-950/30 p-4">
-          <h2 className="mb-3 text-lg font-semibold text-purple-100">Completed</h2>
-          {completedItems.length === 0 ? (
-            <p className="text-purple-200/80">No completed entries yet.</p>
-          ) : (
-            <div className="space-y-2">
-              {completedItems
-                .slice()
-                .sort((a, b) => (a.completed_at < b.completed_at ? 1 : -1))
-                .map((item) => (
+        {viewMode === 'archive' ? (
+          /* 14-Day Archive View */
+          <section className="rounded-xl border border-purple-900/60 bg-purple-950/15 p-5">
+            <h2 className="mb-4 text-base font-semibold text-purple-200">
+              Completed Archive (Last 14 Days)
+            </h2>
+            {archive14dItems.length === 0 ? (
+              <p className="text-sm text-zinc-400">No archived tasks in the last 14 days.</p>
+            ) : (
+              <div className="space-y-2.5">
+                {archive14dItems.map((item) => (
                   <div
                     key={item.id}
-                    className="rounded-lg border border-purple-800 bg-purple-900/30 p-3"
+                    className="flex items-center justify-between rounded-lg border border-purple-900/40 bg-zinc-950/80 p-3"
                   >
-                    <p className="font-medium">{item.title}</p>
-                    <p className="text-sm text-purple-200/90">
-                      {capitalize(item.entry_type)} • {item.category || 'No category'} • Completed:{' '}
-                      {formatDateTime(item.completed_at)}
-                    </p>
+                    <div>
+                      <p className="font-medium text-zinc-200 line-through">{item.title}</p>
+                      <div className="mt-1 flex flex-wrap gap-2 text-xs text-zinc-400">
+                        <span>{item.category || 'Personal'}</span>
+                        <span>•</span>
+                        <span>Completed: {formatDateTime(item.completed_at)}</span>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => toggleCompleted(item)}
+                      className="rounded border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
+                    >
+                      Reopen
+                    </button>
                   </div>
                 ))}
+              </div>
+            )}
+          </section>
+        ) : (
+          <>
+            {/* Daily Progress Card */}
+            <section className="mb-5 rounded-xl border border-emerald-950 bg-zinc-950/90 p-5 shadow-[0_0_25px_rgba(16,185,129,0.05)]">
+              <div className="flex items-center gap-5">
+                <ProgressRing
+                  percent={progress}
+                  done={todayDoneCount}
+                  total={todayTotalCount}
+                />
+                <div>
+                  <p className="text-xs font-medium text-emerald-400">
+                    Daily Progress (Due Today)
+                  </p>
+                  <p className="mt-0.5 text-lg font-bold text-white">
+                    {todayDoneCount} done, {todayLeftCount} left
+                  </p>
+                </div>
+              </div>
+            </section>
+
+            {/* Single-Row Add Task Bar */}
+            <section className="mb-5 rounded-xl border border-emerald-950 bg-zinc-950/90 p-3.5">
+              <form
+                onSubmit={addItem}
+                className="grid grid-cols-1 gap-2.5 sm:grid-cols-12"
+              >
+                <input
+                  className="rounded-md border border-zinc-800 bg-zinc-900/90 px-3 py-2 text-sm text-white placeholder-zinc-500 outline-none focus:border-emerald-500 sm:col-span-4"
+                  placeholder="Add a task..."
+                  value={form.title}
+                  onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
+                  required
+                />
+                <select
+                  className="rounded-md border border-zinc-800 bg-zinc-900/90 px-3 py-2 text-sm text-white outline-none focus:border-emerald-500 sm:col-span-3"
+                  value={form.category}
+                  onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}
+                >
+                  {availableCategories.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  className="rounded-md border border-zinc-800 bg-zinc-900/90 px-3 py-2 text-sm text-white outline-none focus:border-emerald-500 sm:col-span-2"
+                  value={form.priority}
+                  onChange={(e) => setForm((f) => ({ ...f, priority: e.target.value }))}
+                >
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                </select>
+                <input
+                  type="date"
+                  className="rounded-md border border-zinc-800 bg-zinc-900/90 px-3 py-2 text-sm text-white outline-none focus:border-emerald-500 sm:col-span-2"
+                  value={form.due_date}
+                  onChange={(e) => setForm((f) => ({ ...f, due_date: e.target.value }))}
+                />
+                <button
+                  disabled={saving}
+                  className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-black transition hover:bg-emerald-400 disabled:opacity-50 sm:col-span-1"
+                  type="submit"
+                >
+                  {saving ? '...' : 'Add'}
+                </button>
+              </form>
+            </section>
+
+            {/* Tabs & Category Filter Row */}
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap gap-2">
+                <TabButton
+                  active={activeTab === 'today'}
+                  onClick={() => setActiveTab('today')}
+                  label="Due Today"
+                />
+                <TabButton
+                  active={activeTab === 'tomorrow'}
+                  onClick={() => setActiveTab('tomorrow')}
+                  label="Due Tomorrow"
+                />
+                <TabButton
+                  active={activeTab === 'beyond'}
+                  onClick={() => setActiveTab('beyond')}
+                  label="Beyond Tomorrow"
+                />
+              </div>
+
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-emerald-500">Filter:</span>
+                <select
+                  value={categoryFilter}
+                  onChange={(e) => setCategoryFilter(e.target.value)}
+                  className="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-200 outline-none focus:border-emerald-500"
+                >
+                  <option value="All Categories">All Categories</option>
+                  {availableCategories.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
-          )}
-        </section>
+
+            {/* Open Tasks Container */}
+            <section className="mb-6 rounded-xl border border-emerald-950 bg-zinc-950/90">
+              <div className="border-b border-emerald-950/80 px-4 py-3">
+                <h2 className="text-sm font-semibold text-emerald-400">Open Tasks</h2>
+              </div>
+
+              {loading ? (
+                <p className="p-4 text-sm text-zinc-400">Loading tasks...</p>
+              ) : visibleItems.length === 0 ? (
+                <p className="p-4 text-sm text-zinc-400">No open tasks in this view.</p>
+              ) : (
+                <div className="divide-y divide-emerald-950/60">
+                  {visibleItems.map((item) => {
+                    const isOverdue = item.status === 'overdue';
+
+                    return (
+                      <div key={item.id} className="p-4">
+                        {editingId === item.id ? (
+                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-5">
+                            <input
+                              className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm sm:col-span-2"
+                              value={editForm.title}
+                              onChange={(e) =>
+                                setEditForm((f) => ({ ...f, title: e.target.value }))
+                              }
+                            />
+                            <select
+                              className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm"
+                              value={editForm.category}
+                              onChange={(e) =>
+                                setEditForm((f) => ({ ...f, category: e.target.value }))
+                              }
+                            >
+                              {availableCategories.map((cat) => (
+                                <option key={cat} value={cat}>
+                                  {cat}
+                                </option>
+                              ))}
+                            </select>
+                            <select
+                              className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm"
+                              value={editForm.priority}
+                              onChange={(e) =>
+                                setEditForm((f) => ({ ...f, priority: e.target.value }))
+                              }
+                            >
+                              <option value="low">Low</option>
+                              <option value="medium">Medium</option>
+                              <option value="high">High</option>
+                            </select>
+                            <input
+                              type="date"
+                              className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm"
+                              value={editForm.due_date || ''}
+                              onChange={(e) =>
+                                setEditForm((f) => ({ ...f, due_date: e.target.value }))
+                              }
+                            />
+                            <div className="flex gap-2 sm:col-span-5">
+                              <button
+                                onClick={() => saveEdit(item.id)}
+                                className="rounded bg-emerald-500 px-3 py-1 text-xs font-semibold text-black hover:bg-emerald-400"
+                              >
+                                Save
+                              </button>
+                              <button
+                                onClick={() => setEditingId(null)}
+                                className="rounded bg-zinc-800 px-3 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="flex items-start gap-3">
+                              <input
+                                type="checkbox"
+                                checked={item.status === 'completed'}
+                                onChange={() => toggleCompleted(item)}
+                                className="mt-1 h-4 w-4 cursor-pointer rounded border-zinc-700 accent-emerald-500"
+                              />
+                              <div>
+                                <p className="font-medium text-zinc-100">{item.title}</p>
+                                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                  <span className="rounded border border-emerald-800/80 bg-emerald-950/60 px-2 py-0.5 text-xs text-emerald-300">
+                                    {item.category || 'Personal'}
+                                  </span>
+                                  <PriorityBadge priority={item.priority} />
+                                  <span
+                                    className={`rounded border px-2 py-0.5 text-xs ${
+                                      isOverdue
+                                        ? 'border-red-800 bg-red-950/60 text-red-300'
+                                        : 'border-zinc-800 bg-zinc-900 text-zinc-300'
+                                    }`}
+                                  >
+                                    Due: {item.due_date || 'No date'}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex shrink-0 gap-1.5">
+                              <button
+                                onClick={() => startEdit(item)}
+                                className="rounded border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => deleteItem(item.id)}
+                                className="rounded border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-xs text-zinc-300 hover:border-red-800 hover:bg-red-950/50 hover:text-red-200"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+
+            {/* Completed Today Section */}
+            <section className="mb-6 rounded-xl border border-purple-900/70 bg-purple-950/15">
+              <div className="border-b border-purple-900/50 px-4 py-3">
+                <h2 className="text-sm font-semibold text-purple-200">Completed Today</h2>
+              </div>
+              <div className="p-4">
+                {completedTodayItems.length === 0 ? (
+                  <p className="text-sm text-zinc-400">No completed tasks yet.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {completedTodayItems.map((item) => (
+                      <div
+                        key={item.id}
+                        className="flex items-center justify-between rounded-lg border border-purple-900/40 bg-purple-950/20 px-3 py-2"
+                      >
+                        <div className="flex items-center gap-3">
+                          <input
+                            type="checkbox"
+                            checked
+                            onChange={() => toggleCompleted(item)}
+                            className="h-4 w-4 cursor-pointer accent-purple-500"
+                          />
+                          <span className="text-sm text-purple-200 line-through">
+                            {item.title}
+                          </span>
+                        </div>
+                        <span className="text-xs text-purple-300/70">
+                          {item.category || 'Personal'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </section>
+          </>
+        )}
 
         {error ? (
-          <div className="mb-4 rounded-lg border border-rose-700 bg-rose-950/40 p-3 text-rose-100">
+          <div className="mb-4 rounded-lg border border-red-800 bg-red-950/40 p-3 text-sm text-red-200">
             {error}
           </div>
         ) : null}
 
-        <footer className="pt-2 text-center text-sm text-slate-400">Created by Rich Ruiz</footer>
+        <footer className="border-t border-zinc-900 pt-4 text-center text-xs text-emerald-500/80">
+          Created by Rich Ruiz
+        </footer>
       </div>
     </main>
   );
 }
 
-function TabButton({ active = false, onClick = () => {}, label = '', count = 0 }) {
-  useEffect(() => {
-    const now = new Date();
-    setTodayStr(toDateInputValue(now));
-    setTomorrowStr(toDateInputValue(addDays(now, 1)));
-  }, []);
-
+function TabButton({ active = false, onClick = () => {}, label = '' }) {
   return (
     <button
       onClick={onClick}
-      className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
-        active ? 'bg-purple-600 text-white' : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
+      className={`rounded-md px-3.5 py-1.5 text-sm font-medium transition ${
+        active
+          ? 'bg-emerald-500 text-black font-semibold'
+          : 'border border-zinc-800 bg-zinc-900 text-emerald-400 hover:bg-zinc-800'
       }`}
       type="button"
     >
-      {label} ({count})
+      {label}
     </button>
   );
 }
 
-function StatusBadge({ status = 'open' }) {
-  const base = 'inline-block rounded-full px-2 py-1 text-xs font-semibold mt-2';
-  if (status === 'completed') {
-    return <span className={`${base} bg-emerald-900 text-emerald-200`}>Completed</span>;
-  }
-  if (status === 'overdue') {
-    return <span className={`${base} bg-red-900 text-red-200`}>Overdue</span>;
-  }
-  return <span className={`${base} bg-slate-700 text-slate-200`}>Open</span>;
+function PriorityBadge({ priority = 'medium' }) {
+  const styles = {
+    high: 'border-red-900/80 bg-red-950/60 text-red-300',
+    medium: 'border-amber-900/80 bg-amber-950/60 text-amber-300',
+    low: 'border-zinc-700 bg-zinc-800 text-zinc-300',
+  };
+  return (
+    <span
+      className={`rounded border px-2 py-0.5 text-xs ${
+        styles[priority] || styles.medium
+      }`}
+    >
+      {capitalize(priority)}
+    </span>
+  );
 }
 
-function ProgressRing({ percent = 0 }) {
-  const radius = 30;
-  const stroke = 8;
+function ProgressRing({ percent = 0, done = 0, total = 0 }) {
+  const radius = 38;
+  const stroke = 6;
   const normalizedRadius = radius - stroke / 2;
   const circumference = normalizedRadius * 2 * Math.PI;
   const strokeDashoffset = circumference - (percent / 100) * circumference;
-  useEffect(() => {
-    const now = new Date();
-    setTodayStr(toDateInputValue(now));
-    setTomorrowStr(toDateInputValue(addDays(now, 1)));
-  }, []);
-
 
   return (
-    <svg height={radius * 2} width={radius * 2} className="shrink-0">
-      <circle
-        stroke="#334155"
-        fill="transparent"
-        strokeWidth={stroke}
-        r={normalizedRadius}
-        cx={radius}
-        cy={radius}
-      />
-      <circle
-        stroke="#a855f7"
-        fill="transparent"
-        strokeWidth={stroke}
-        strokeLinecap="round"
-        strokeDasharray={`${circumference} ${circumference}`}
-        style={{ strokeDashoffset }}
-        r={normalizedRadius}
-        cx={radius}
-        cy={radius}
-        transform={`rotate(-90 ${radius} ${radius})`}
-      />
-    </svg>
+    <div className="relative flex items-center justify-center">
+      <svg height={radius * 2} width={radius * 2} className="shrink-0">
+        <circle
+          stroke="#18181b"
+          fill="transparent"
+          strokeWidth={stroke}
+          r={normalizedRadius}
+          cx={radius}
+          cy={radius}
+        />
+        <circle
+          stroke="#10b981"
+          fill="transparent"
+          strokeWidth={stroke}
+          strokeLinecap="round"
+          strokeDasharray={`${circumference} ${circumference}`}
+          style={{ strokeDashoffset }}
+          r={normalizedRadius}
+          cx={radius}
+          cy={radius}
+          transform={`rotate(-90 ${radius} ${radius})`}
+        />
+      </svg>
+      <div className="absolute flex flex-col items-center justify-center text-center">
+        <span className="text-sm font-bold text-emerald-400">{percent}%</span>
+        <span className="text-[10px] text-emerald-500/80">
+          {done}/{total}
+        </span>
+      </div>
+    </div>
   );
 }
 
@@ -629,5 +766,3 @@ function formatDateTime(iso) {
 }
 
 export default LifeHQPage;
-
-
