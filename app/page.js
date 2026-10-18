@@ -26,12 +26,31 @@ function dueDateKey(value) {
   return String(value).slice(0, 10);
 }
 
+function dueTimeKey(value) {
+  if (!value) return '';
+  return String(value).slice(0, 5);
+}
+
+function dueDateTimeLabel(dueDate, dueTime) {
+  const d = dueDateKey(dueDate);
+  if (!d) return '—';
+  const t = dueTimeKey(dueTime);
+  return t ? `${d} ${t}` : `${d} (any time)`;
+}
+
 function isOverdueTask(task, todayKey) {
   if (!todayKey) return false;
   if (task?.completed_at) return false;
   const key = dueDateKey(task?.due_date);
   if (!key) return false;
   return key < todayKey;
+}
+
+function taskSortStamp(task, noTimeAtEnd = true) {
+  const d = dueDateKey(task?.due_date) || '9999-12-31';
+  const t = dueTimeKey(task?.due_time);
+  const timePart = t || (noTimeAtEnd ? '99:99' : '00:00');
+  return `${d}T${timePart}`;
 }
 
 function quoteForDay(dayKey) {
@@ -87,6 +106,7 @@ export default function Page() {
   const [newCategory, setNewCategory] = useState('Personal');
   const [newPriority, setNewPriority] = useState('Medium');
   const [newDueDate, setNewDueDate] = useState('');
+  const [newDueTime, setNewDueTime] = useState('');
   const [newEntryType, setNewEntryType] = useState('task');
 
   const [tasks, setTasks] = useState([]);
@@ -107,6 +127,7 @@ export default function Page() {
   const [editCategory, setEditCategory] = useState('Personal');
   const [editPriority, setEditPriority] = useState('Medium');
   const [editDueDate, setEditDueDate] = useState('');
+  const [editDueTime, setEditDueTime] = useState('');
   const [editEntryType, setEditEntryType] = useState('task');
 
   const todayKey = currentDay;
@@ -117,6 +138,7 @@ export default function Page() {
       .from('tasks')
       .select('*')
       .order('due_date', { ascending: true })
+      .order('due_time', { ascending: true, nullsFirst: false })
       .order('created_at', { ascending: true });
 
     if (error) throw error;
@@ -245,23 +267,36 @@ export default function Page() {
   const openTasks = useMemo(() => tasks.filter((t) => !t.completed_at), [tasks]);
 
   const filteredOpenTasks = useMemo(() => {
-    return openTasks.filter((t) => {
+    const base = openTasks.filter((t) => {
       const inDueBucket = bucketForDueDate(t.due_date) === dueTab;
       const inCategory =
         categoryFilter === 'all' ? true : (t.category || 'Uncategorized') === categoryFilter;
       return inDueBucket && inCategory;
     });
+
+    return [...base].sort((a, b) => {
+      const aStamp = taskSortStamp(a, true);
+      const bStamp = taskSortStamp(b, true);
+      if (aStamp < bStamp) return -1;
+      if (aStamp > bStamp) return 1;
+
+      const aCreated = new Date(a.created_at || 0).getTime();
+      const bCreated = new Date(b.created_at || 0).getTime();
+      return aCreated - bCreated;
+    });
   }, [openTasks, dueTab, categoryFilter, todayKey, tomorrowKey]);
 
   const completedTodayTasks = useMemo(() => {
     if (!todayKey) return [];
-    return tasks.filter((t) => {
-      if (!t.completed_at) return false;
-      const completedDay = localDateKey(new Date(t.completed_at));
-      const inCategory =
-        categoryFilter === 'all' ? true : (t.category || 'Uncategorized') === categoryFilter;
-      return completedDay === todayKey && inCategory;
-    });
+    return tasks
+      .filter((t) => {
+        if (!t.completed_at) return false;
+        const completedDay = localDateKey(new Date(t.completed_at));
+        const inCategory =
+          categoryFilter === 'all' ? true : (t.category || 'Uncategorized') === categoryFilter;
+        return completedDay === todayKey && inCategory;
+      })
+      .sort((a, b) => new Date(b.completed_at).getTime() - new Date(a.completed_at).getTime());
   }, [tasks, todayKey, categoryFilter]);
 
   const archiveTasks = useMemo(() => {
@@ -279,16 +314,15 @@ export default function Page() {
       .sort((a, b) => new Date(b.completed_at).getTime() - new Date(a.completed_at).getTime());
   }, [tasks, todayKey]);
 
-  // Meter 1: Due Today completion
   const todayDueAll = useMemo(() => {
     if (!todayKey) return [];
     return tasks.filter((t) => dueDateKey(t.due_date) === todayKey);
   }, [tasks, todayKey]);
+
   const todayDueDone = todayDueAll.filter((t) => !!t.completed_at).length;
   const todayDueTotal = todayDueAll.length;
   const dueTodayPct = todayDueTotal === 0 ? 0 : Math.round((todayDueDone / todayDueTotal) * 100);
 
-  // Meter 2: Done Today over today activity
   const doneTodayCount = completedTodayTasks.length;
   const todayActivityTotal = useMemo(() => {
     const ids = new Set();
@@ -299,7 +333,6 @@ export default function Page() {
   const doneTodayPct =
     todayActivityTotal === 0 ? 0 : Math.round((doneTodayCount / todayActivityTotal) * 100);
 
-  // Meter 3: Overdue open over all open tasks
   const overdueOpenCount = useMemo(
     () => openTasks.filter((t) => isOverdueTask(t, todayKey)).length,
     [openTasks, todayKey]
@@ -334,6 +367,7 @@ export default function Page() {
         category: newCategory || 'Personal',
         priority: newPriority || 'Medium',
         due_date: newDueDate || todayKey,
+        due_time: newDueTime || null,
         entry_type: (newEntryType || 'task').toLowerCase(),
       };
 
@@ -344,6 +378,7 @@ export default function Page() {
       setNewCategory('Personal');
       setNewPriority('Medium');
       setNewDueDate(todayKey);
+      setNewDueTime('');
       setNewEntryType('task');
       await reloadTasks();
     } catch (e) {
@@ -386,6 +421,7 @@ export default function Page() {
     setEditCategory(task.category || 'Personal');
     setEditPriority(task.priority || 'Medium');
     setEditDueDate(dueDateKey(task.due_date) || todayKey);
+    setEditDueTime(dueTimeKey(task.due_time) || '');
     setEditEntryType((task.entry_type || 'task').toLowerCase());
   }
 
@@ -395,6 +431,7 @@ export default function Page() {
     setEditCategory('Personal');
     setEditPriority('Medium');
     setEditDueDate('');
+    setEditDueTime('');
     setEditEntryType('task');
   }
 
@@ -411,6 +448,7 @@ export default function Page() {
           category: editCategory || 'Personal',
           priority: editPriority || 'Medium',
           due_date: editDueDate || todayKey,
+          due_time: editDueTime || null,
           entry_type: (editEntryType || 'task').toLowerCase(),
         })
         .eq('id', taskId);
@@ -661,7 +699,7 @@ export default function Page() {
                   onSubmit={addTask}
                   className="rounded-xl border border-emerald-500/20 bg-zinc-950 p-4"
                 >
-                  <div className="grid grid-cols-1 gap-2 md:grid-cols-7">
+                  <div className="grid grid-cols-1 gap-2 md:grid-cols-8">
                     <input
                       value={newTask}
                       onChange={(e) => setNewTask(e.target.value)}
@@ -702,6 +740,12 @@ export default function Page() {
                       type="date"
                       value={newDueDate}
                       onChange={(e) => setNewDueDate(e.target.value)}
+                      className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                    />
+                    <input
+                      type="time"
+                      value={newDueTime}
+                      onChange={(e) => setNewDueTime(e.target.value)}
                       className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
                     />
                     <button
@@ -772,7 +816,7 @@ export default function Page() {
                             }`}
                           >
                             {editingId === task.id ? (
-                              <div className="grid grid-cols-1 gap-2 md:grid-cols-7">
+                              <div className="grid grid-cols-1 gap-2 md:grid-cols-8">
                                 <input
                                   value={editTaskTitle}
                                   onChange={(e) => setEditTaskTitle(e.target.value)}
@@ -812,6 +856,12 @@ export default function Page() {
                                   type="date"
                                   value={editDueDate}
                                   onChange={(e) => setEditDueDate(e.target.value)}
+                                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
+                                />
+                                <input
+                                  type="time"
+                                  value={editDueTime}
+                                  onChange={(e) => setEditDueTime(e.target.value)}
                                   className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-emerald-100 outline-none focus:border-emerald-500"
                                 />
                                 <div className="flex gap-2">
@@ -861,7 +911,7 @@ export default function Page() {
                                             : 'border-zinc-700 bg-zinc-900 text-zinc-300'
                                         }`}
                                       >
-                                        Due: {dueDateKey(task.due_date) || '—'}
+                                        Due: {dueDateTimeLabel(task.due_date, task.due_time)}
                                       </span>
                                       {overdue && (
                                         <span className="rounded border border-red-400/50 bg-red-600/30 px-2 py-0.5 text-red-100">
@@ -933,7 +983,7 @@ export default function Page() {
                                   {task.priority || 'Medium'}
                                 </span>
                                 <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
-                                  Due: {dueDateKey(task.due_date) || '—'}
+                                  Due: {dueDateTimeLabel(task.due_date, task.due_time)}
                                 </span>
                                 <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
                                   Completed:{' '}
@@ -987,7 +1037,7 @@ export default function Page() {
                             {task.priority || 'Medium'}
                           </span>
                           <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
-                            Due: {dueDateKey(task.due_date) || '—'}
+                            Due: {dueDateTimeLabel(task.due_date, task.due_time)}
                           </span>
                           <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-300">
                             Completed:{' '}
@@ -1011,7 +1061,7 @@ export default function Page() {
                 </p>
               </div>
 
-              <div className="p-4 space-y-4">
+              <div className="space-y-4 p-4">
                 <form onSubmit={createList} className="flex gap-2">
                   <input
                     value={newListName}
