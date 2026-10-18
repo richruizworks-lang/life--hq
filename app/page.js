@@ -31,8 +31,8 @@ function LifeHQPage() {
 
   const hasSupabaseConfig = SUPABASE_URL && SUPABASE_ANON_KEY;
 
-  const todayStr = toDateInputValue(new Date());
-  const tomorrowStr = toDateInputValue(addDays(new Date(), 1));
+  const [todayStr, setTodayStr] = useState("");
+  const [tomorrowStr, setTomorrowStr] = useState("");
 
   useEffect(() => {
     loadItems();
@@ -270,6 +270,12 @@ function LifeHQPage() {
       setSaving(false);
     }
   }
+  useEffect(() => {
+    const now = new Date();
+    setTodayStr(toDateInputValue(now));
+    setTomorrowStr(toDateInputValue(addDays(now, 1)));
+  }, []);
+
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
@@ -380,6 +386,12 @@ function LifeHQPage() {
                 const cardClass = isOverdue
                   ? 'border-red-700 bg-red-950/30'
                   : 'border-slate-800 bg-slate-950';
+  useEffect(() => {
+    const now = new Date();
+    setTodayStr(toDateInputValue(now));
+    setTomorrowStr(toDateInputValue(addDays(now, 1)));
+  }, []);
+
 
                 return (
                   <div key={item.id} className={`rounded-lg border p-3 ${cardClass}`}>
@@ -522,6 +534,12 @@ function LifeHQPage() {
 }
 
 function TabButton({ active = false, onClick = () => {}, label = '', count = 0 }) {
+  useEffect(() => {
+    const now = new Date();
+    setTodayStr(toDateInputValue(now));
+    setTomorrowStr(toDateInputValue(addDays(now, 1)));
+  }, []);
+
   return (
     <button
       onClick={onClick}
@@ -552,6 +570,12 @@ function ProgressRing({ percent = 0 }) {
   const normalizedRadius = radius - stroke / 2;
   const circumference = normalizedRadius * 2 * Math.PI;
   const strokeDashoffset = circumference - (percent / 100) * circumference;
+  useEffect(() => {
+    const now = new Date();
+    setTodayStr(toDateInputValue(now));
+    setTomorrowStr(toDateInputValue(addDays(now, 1)));
+  }, []);
+
 
   return (
     <svg height={radius * 2} width={radius * 2} className="shrink-0">
