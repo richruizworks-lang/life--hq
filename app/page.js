@@ -3,6 +3,21 @@
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
 
+const STORAGE_KEY = "lifehq:tasks:v1";
+
+function safeLoadTasks() {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+
 function localDateKey(d) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -53,7 +68,7 @@ export default function Page() {
   const [newPriority, setNewPriority] = useState('Medium');
   const [newDueDate, setNewDueDate] = useState('');
 
-  const [tasks, setTasks] = useState([]);
+  const [tasks, setTasks] = useState(() => safeLoadTasks());
   const [archiveTasks, setArchiveTasks] = useState([]);
 
   const [loading, setLoading] = useState(true);
@@ -131,6 +146,16 @@ export default function Page() {
         refreshAll();
       }
     }, 60_000);
+  useEffect(() => {
+    try {
+      const data = typeof entries !== "undefined"
+        ? entries
+        : (typeof tasks !== "undefined" ? tasks : (typeof items !== "undefined" ? items : []));
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    } catch {}
+  }, [typeof entries !== "undefined" ? entries : (typeof tasks !== "undefined" ? tasks : items)]);
+
+
 
     return () => clearInterval(timer);
   }, [currentDay]);
