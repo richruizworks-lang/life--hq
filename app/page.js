@@ -151,19 +151,25 @@ function LifeHQPage() {
   const matchesCategory = (item) =>
     categoryFilter === 'All Categories' || item.category === categoryFilter;
 
-  const dueTodayItems = normalizedItems.filter((i) => {
+  const dueTodayItems = normalizedItems
+  .filter((i) => {
     if (i.status === 'completed' || !matchesCategory(i)) return false;
-    return !i.due_date || i.due_date === todayStr || i.status === 'overdue';
-  });
+    return !i.due_date || i.due_date.startsWith(todayStr) || i.status === 'overdue';
+  })
+  .sort((a, b) => (a.due_date || '').localeCompare(b.due_date || ''));
 
-  const dueTomorrowItems = normalizedItems.filter(
-    (i) => i.status !== 'completed' && matchesCategory(i) && i.due_date === tomorrowStr
-  );
+const dueTomorrowItems = normalizedItems
+  .filter(
+    (i) => i.status !== 'completed' && matchesCategory(i) && (i.due_date || '').startsWith(tomorrowStr)
+  )
+  .sort((a, b) => (a.due_date || '').localeCompare(b.due_date || ''));
 
-  const beyondTomorrowItems = normalizedItems.filter((i) => {
+const beyondTomorrowItems = normalizedItems
+  .filter((i) => {
     if (i.status === 'completed' || !matchesCategory(i)) return false;
-    return i.due_date && i.due_date > tomorrowStr;
-  });
+    return i.due_date && i.due_date > tomorrowStr + 'T23:59';
+  })
+  .sort((a, b) => (a.due_date || '').localeCompare(b.due_date || ''));
 
   // Completed Today vs 14-Day Archive
   const completedTodayItems = normalizedItems.filter((i) => {
@@ -540,13 +546,11 @@ function LifeHQPage() {
                               <option value="high">High</option>
                             </select>
                             <input
-                              type="date"
-                              className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm"
-                              value={editForm.due_date || ''}
-                              onChange={(e) =>
-                                setEditForm((f) => ({ ...f, due_date: e.target.value }))
-                              }
-                            />
+  type="datetime-local"
+  className="rounded-md border border-zinc-800 bg-zinc-900/90 px-3 py-2 text-sm text-white outline-none focus:border-emerald-500 sm:col-span-2"
+  value={form.due_date}
+  onChange={(e) => setForm((f) => ({ ...f, due_date: e.target.value }))}
+/>
                             <div className="flex gap-2 sm:col-span-5">
                               <button
                                 onClick={() => saveEdit(item.id)}
