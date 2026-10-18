@@ -42,14 +42,12 @@ function LifeHQPage() {
   });
 
   // Inline Edit Form State
-  const [editingId, setEditingId] = useState(null);
-  const [editForm, setEditForm] = useState({
-    title: '',
-    category: 'Personal',
-    priority: 'medium',
-    due_date: '',
-    entry_type: 'task',
-  });
+ // Custom Side Lists State
+const [customLists, setCustomLists] = useState([
+  { id: '1', title: 'Grocery List', items: ['Milk', 'Eggs', 'Coffee'] }
+]);
+const [newListTitle, setNewListTitle] = useState('');
+const [newItemText, setNewItemText] = useState({});
 
   // Initialize Local Dates Once on Mount
   useEffect(() => {
@@ -656,18 +654,128 @@ const beyondTomorrowItems = normalizedItems
           </>
         )}
 
-        {error ? (
-          <div className="mb-4 rounded-lg border border-red-800 bg-red-950/40 p-3 text-sm text-red-200">
-            {error}
-          </div>
-        ) : null}
+        {/* Custom Side Lists Section */}
+      <section className="mb-6 rounded-xl border border-emerald-950 bg-zinc-950/90 p-5">
+        <h2 className="mb-4 text-base font-semibold text-emerald-400">Custom Lists (Scratchpads)</h2>
+        
+        {/* Add New List Form */}
+        <div className="mb-4 flex gap-2">
+          <input
+            className="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-sm text-white placeholder-zinc-500 outline-none focus:border-emerald-500 flex-1"
+            placeholder="New list title (e.g., Grocery List)..."
+            value={newListTitle}
+            onChange={(e) => setNewListTitle(e.target.value)}
+          />
+          <button
+            onClick={() => {
+              if (!newListTitle.trim()) return;
+              setCustomLists([
+                ...customLists,
+                { id: Date.now().toString(), title: newListTitle.trim(), items: [] }
+              ]);
+              setNewListTitle('');
+            }}
+            className="rounded-md bg-emerald-500 px-4 py-1.5 text-sm font-semibold text-black hover:bg-emerald-400"
+          >
+            Add List
+          </button>
+        </div>
 
-        <footer className="border-t border-zinc-900 pt-4 text-center text-xs text-emerald-500/80">
-          Created by Rich Ruiz
-        </footer>
-      </div>
-    </main>
-  );
+        {/* Render Custom Lists */}
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          {customLists.map((list) => (
+            <div key={list.id} className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <h3 className="font-semibold text-emerald-300">{list.title}</h3>
+                <button
+                  onClick={() => {
+                    setCustomLists(customLists.filter((l) => l.id !== list.id));
+                  }}
+                  className="text-xs text-zinc-500 hover:text-red-400"
+                >
+                  Delete List
+                </button>
+              </div>
+
+              {/* Items in List */}
+              <div className="space-y-2 mb-3">
+                {list.items.length === 0 ? (
+                  <p className="text-xs text-zinc-500">No items yet.</p>
+                ) : (
+                  list.items.map((itemText, idx) => (
+                    <div key={idx} className="flex items-center justify-between text-sm text-zinc-200">
+                      <span>• {itemText}</span>
+                      <button
+                        onClick={() => {
+                          const updatedItems = list.items.filter((_, i) => i !== idx);
+                          setCustomLists(
+                            customLists.map((l) => (l.id === list.id ? { ...l, items: updatedItems } : l))
+                          );
+                        }}
+                        className="text-xs text-zinc-600 hover:text-red-400"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {/* Add Item to List Form */}
+              <div className="flex gap-2">
+                <input
+                  className="rounded border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-xs text-white placeholder-zinc-600 outline-none focus:border-emerald-500 flex-1"
+                  placeholder="Add item..."
+                  value={newItemText[list.id] || ''}
+                  onChange={(e) =>
+                    setNewItemText({ ...newItemText, [list.id]: e.target.value })
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && newItemText[list.id]?.trim()) {
+                      const val = newItemText[list.id].trim();
+                      setCustomLists(
+                        customLists.map((l) =>
+                          l.id === list.id ? { ...l, items: [...l.items, val] } : l
+                        )
+                      );
+                      setNewItemText({ ...newItemText, [list.id]: '' });
+                    }
+                  }}
+                />
+                <button
+                  onClick={() => {
+                    const val = newItemText[list.id]?.trim();
+                    if (!val) return;
+                    setCustomLists(
+                      customLists.map((l) =>
+                        l.id === list.id ? { ...l, items: [...l.items, val] } : l
+                      )
+                    );
+                    setNewItemText({ ...newItemText, [list.id]: '' });
+                  }}
+                  className="rounded bg-zinc-800 px-3 py-1 text-xs text-emerald-400 hover:bg-zinc-700"
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {error ? (
+        <div className="mb-4 rounded-lg border border-red-800 bg-red-950/40 p-3 text-sm text-red-200">
+          {error}
+        </div>
+      ) : null}
+
+      <footer className="border-t border-zinc-900 pt-4 text-center text-xs text-emerald-500/80">
+        Created by Rich Ruiz
+      </footer>
+    </div>
+  </main>
+);
+}
 }
 
 function TabButton({ active = false, onClick = () => {}, label = '' }) {
